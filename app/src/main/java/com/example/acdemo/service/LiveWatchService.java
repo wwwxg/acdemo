@@ -85,8 +85,11 @@ public class LiveWatchService extends Service {
             String action = intent.getStringExtra("action");
             
             if ("stop".equals(action)) {
-                stopWatching(uperId);
-                Log.d(TAG, "Stopped watching for uperId: " + uperId);
+                Timer timer = watchingTimers.remove(uperId);
+                if (timer != null) {
+                    timer.cancel();
+                    Log.d(TAG, "Stopped watching for uperId: " + uperId);
+                }
             } else {
                 String liveId = intent.getStringExtra("liveId");
                 if (liveId != null && !watchingTimers.containsKey(uperId)) {
@@ -98,14 +101,8 @@ public class LiveWatchService extends Service {
     }
     
     private void startWatching(String liveId, String uperId) {
-        // 检查是否已经有这个直播间的WebView
-        if (webviews.containsKey(uperId)) {
-            Log.d(TAG, "WebView already exists for uperId: " + uperId);
-            return;  // 如果已存在，直接返回，不再获取token
-        }
-        
-        // 检查是否已有有效的ticket
-        if (isTicketValid(uperId)) {
+        // 检查是否已有有效的ticket和liveId
+        if (isTicketValid(uperId) && isLiveIdValid(liveId, uperId)) {
             startPlayWithToken(liveId, uperId, null);
             return;
         }
@@ -140,11 +137,8 @@ public class LiveWatchService extends Service {
                     JSONObject result = new JSONObject(json);
                     if (result.getInt("result") == 0) {
                         String midgroundToken = result.getString("acfun.midground.api_st");
-                        
-                        // 检查WebView是否已经被其他线程创建
-                        if (!webviews.containsKey(uperId)) {
-                            startPlayWithToken(liveId, uperId, midgroundToken);
-                        }
+                            
+                        startPlayWithToken(liveId, uperId, midgroundToken);
                     }
                 } catch (Exception e) {
                     Log.e(TAG, "Get token failed", e);
@@ -171,34 +165,29 @@ public class LiveWatchService extends Service {
         return System.currentTimeMillis() - timestamp < LIVEID_EXPIRE_TIME;
     }
     
+    private void onHeartbeatError(String uperId, String liveId) {
+        // 心跳失败时，清除ticket并重新获取
+        tickets.remove(uperId);
+        ticketTimestamps.remove(uperId);
+        liveIdTimestamps.remove(uperId);
+        startWatching(liveId, uperId);
+    }
+    
     private void startPlayWithToken(String liveId, String uperId, String midgroundToken) {
-        // 再次检查是否已经有这个直播间的WebView
+        // 检查是否已经有这个直播间的WebView
         if (webviews.containsKey(uperId)) {
             Log.d(TAG, "WebView already exists for uperId: " + uperId);
             return;
         }
 
         new Handler(Looper.getMainLooper()).post(() -> {
-            // 最后一次检查，确保不会重复创建
-            if (webviews.containsKey(uperId)) {
-                Log.d(TAG, "WebView was created by another thread for uperId: " + uperId);
-                return;
-            }
-            
             Log.d(TAG, "Starting watch with liveId: " + liveId + ", uperId: " + uperId);
             
             WebView webView = new WebView(this);
-            WebSettings settings = webView.getSettings();
-            settings.setJavaScriptEnabled(true);
-            settings.setDomStorageEnabled(true);
+            webView.getSettings().setJavaScriptEnabled(true);
+            webView.getSettings().setDomStorageEnabled(true);
             
-            // 禁用图片��载
-            settings.setLoadsImagesAutomatically(false);
-            settings.setBlockNetworkImage(true);
-            
-            // 禁用缓存
-            settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
-            
+            webView.getSettings().setCacheMode(WebSettings.LOAD_NO_CACHE);
             webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
             webView.getSettings().setMediaPlaybackRequiresUserGesture(true);
             
@@ -210,14 +199,13 @@ public class LiveWatchService extends Service {
                 @Override
                 public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
                     String message = consoleMessage.message();
-                    
-                    // 过滤掉不需要的日志
-                    if (message.contains("redpackListChanged") || 
-                        message.contains("topUserChanged")) {
-                        return true;  // 返回 true 表示已处理此消息
+                    // 检测直播间状态
+                    if (message.contains("直播已结束") || message.contains("主播未开播")) {
+                        Log.d(TAG, "直播已结束或未开播，停止服务: " + uperId);
+                        stopWatching(uperId);
+                        return true;
                     }
                     
-                    // 原有的心跳检测
                     if (message.contains("liveCsCmd ZtLiveCsHeartbeat")) {
                         Log.d(TAG, "Detected heartbeat for uperId: " + uperId);
                         resetKeepAliveTimer(webView, uperId);
@@ -322,6 +310,71 @@ public class LiveWatchService extends Service {
             @Override
             public void onFailure(Call call, IOException e) {
                 Log.e(TAG, "Stream connection failed", e);
+            }
+        });
+    }
+    
+    private void startHeartbeat(String uperId, String liveId) {
+        Log.d(TAG, "Starting heartbeat for uperId: " + uperId);
+        Timer timer = new Timer();
+        timer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                sendHeartbeat(uperId, liveId);
+            }
+        }, 0, 30000);
+        
+        watchingTimers.put(uperId, timer);
+    }
+    
+    private void sendHeartbeat(String uperId, String liveId) {
+        String cookies = com.example.acdemo.utils.CookieManager.getCookies();
+        String ticket = tickets.get(uperId);
+        
+        if (ticket == null) {
+            Log.w(TAG, "No ticket available for uperId: " + uperId);
+            return;
+        }
+        
+        Log.d(TAG, "Sending heartbeat for uperId: " + uperId);
+        
+        FormBody formBody = new FormBody.Builder()
+            .add("liveId", liveId)
+            .add("liveCsCmd", "ZtLiveCsHeartbeat")
+            .add("ticket", ticket)
+            .add("csrfToken", extractToken(cookies, "csrfToken"))
+            .build();
+
+        Request request = new Request.Builder()
+            .url("https://api.kuaishouzt.com/rest/zt/live/web/heartbeat")
+            .header("Cookie", cookies)
+            .header("Accept", "application/json, text/plain, */*")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("Origin", "https://live.acfun.cn")
+            .header("Referer", "https://live.acfun.cn/live/" + uperId)
+            .post(formBody)
+            .build();
+            
+        client.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                Log.e(TAG, "Heartbeat failed for uperId: " + uperId, e);
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                try {
+                    String json = response.body().string();
+                    Log.d(TAG, "Heartbeat response for uperId " + uperId + ": " + json);
+                    JSONObject result = new JSONObject(json);
+                    if (result.getInt("result") == 1) {
+                        Log.d(TAG, "Heartbeat success for uperId: " + uperId);
+                    } else {
+                        Log.e(TAG, "Heartbeat error for uperId " + uperId + ": " + json);
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Parse heartbeat response failed for uperId: " + uperId, e);
+                }
             }
         });
     }

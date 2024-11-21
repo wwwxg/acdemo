@@ -3,29 +3,27 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:padding="8dp">
 
     <TextView
         android:id="@+id/userInfoText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textSize="16sp" />
+        android:textSize="14sp"
+        android:layout_marginBottom="8dp" />
 
-    <TextView
-        android:id="@+id/liveListText"
+    <ScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1"
-        android:layout_marginTop="16dp"
-        android:textSize="14sp" />
+        android:layout_weight="1">
 
-    <TextView
-        android:id="@+id/runtimeText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:textSize="12sp"
-        android:singleLine="true"
-        android:ellipsize="end" />
+        <TextView
+            android:id="@+id/liveListText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="14sp"
+            android:lineSpacingExtra="2dp" />
+
+    </ScrollView>
 
 </LinearLayout>

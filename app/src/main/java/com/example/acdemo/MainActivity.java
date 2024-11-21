@@ -23,7 +23,6 @@ public class MainActivity extends AppCompatActivity {
     private static final String TAG = "AcDemo_MainActivity";
     private TextView userInfoText;
     private TextView liveListText;
-    private TextView runtimeText;
     private OkHttpClient client;
     private static final String USER_INFO_API = "https://www.acfun.cn/rest/pc-direct/user/personalInfo";
     private static final String LIVE_LIST_API = "https://live.acfun.cn/api/channel/list?count=100&pcursor=&filters=[%7B%22filterType%22:3,+%22filterId%22:0%7D]";
@@ -37,12 +36,6 @@ public class MainActivity extends AppCompatActivity {
     private Handler refreshHandler = new Handler();
     private static final long REFRESH_INTERVAL = 120000; // 2分钟
     private Map<String, String> liveIdMap = new HashMap<>(); // 存储主播ID和直播间ID的映射
-    
-    private static String startTime = null;  // 启动时间
-    private Handler runtimeHandler = new Handler();
-    private static long startTimeMillis; // 记录启动的时间戳
-    
-    private Map<String, Long> experienceFullUperIds = new HashMap<>(); // 记录经验值已满的主播ID和时间
     
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -64,7 +57,6 @@ public class MainActivity extends AppCompatActivity {
         
         userInfoText = findViewById(R.id.userInfoText);
         liveListText = findViewById(R.id.liveListText);
-        runtimeText = findViewById(R.id.runtimeText);
         
         client = new OkHttpClient.Builder()
                 .followRedirects(true)
@@ -80,22 +72,6 @@ public class MainActivity extends AppCompatActivity {
         
         // 启动定时刷新
         startPeriodicRefresh();
-        
-        // 如果是第一次启动，记录启动时间
-        if (startTime == null) {
-            startTime = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
-                    .format(new java.util.Date());
-            startTimeMillis = System.currentTimeMillis();
-        }
-        
-        // 每秒更新运行时间
-        runtimeHandler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                updateRuntime();
-                runtimeHandler.postDelayed(this, 1000);
-            }
-        }, 1000);
     }
     
     private void startPeriodicRefresh() {
@@ -111,7 +87,6 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         refreshHandler.removeCallbacksAndMessages(null);
-        runtimeHandler.removeCallbacksAndMessages(null);
         super.onDestroy();
     }
     
@@ -237,7 +212,7 @@ public class MainActivity extends AppCompatActivity {
                         finalStringBuilder.append("当前正在直播且粉丝牌未满的主播：\n\n");
                         
                         pendingRequests = 0;
-                        liveIdMap.clear(); // 清空前的映射
+                        liveIdMap.clear(); // 清空之前的映射
                         
                         for (int i = 0; i < liveList.length(); i++) {
                             JSONObject live = liveList.getJSONObject(i);
@@ -305,39 +280,22 @@ public class MainActivity extends AppCompatActivity {
                         int watchDegree = medalInfo.getInt("liveWatchDegree");
                         int watchLimit = medalInfo.getInt("liveWatchDegreeLimit");
                         
-                        if (watchDegree >= watchLimit) {
-                            // 经验值已满,记录时间并停止观看
-                            experienceFullUperIds.put(uperId, System.currentTimeMillis());
-                            Intent intent = new Intent(MainActivity.this, LiveWatchService.class);
-                            intent.putExtra("uperId", uperId);
-                            intent.putExtra("action", "stop");
-                            startService(intent);
-                            checkAndUpdateUI(index, "");
-                            return;
-                        }
-                        
-                        // 检查是否是新的一天
-                        Long fullTime = experienceFullUperIds.get(uperId);
-                        if (fullTime != null) {
-                            if (isSameDay(fullTime, System.currentTimeMillis())) {
-                                // 同一天内不再处理
-                                checkAndUpdateUI(index, "");
-                                return;
-                            } else {
-                                // 新的一天,移除记录
-                                experienceFullUperIds.remove(uperId);
-                            }
-                        }
-                        
                         if (watchDegree < watchLimit) {
                             // 获取直播间状态
                             boolean isInRoom = LiveWatchService.roomStatuses.containsKey(uperId);
                             String status = isInRoom ? " (已进入直播间)" : "";
                             
-                            String info = String.format("☊ %s (%d/%d)%s %s\n",
-                                nickname, watchDegree, watchLimit, status, title);
+                            String info = String.format("%d. %s (%d/%d)%s %s\n",
+                                index, nickname, watchDegree, watchLimit, status, title);
                             liveIdMap.put(uperId, liveId);
                             checkAndUpdateUI(index, info);
+                        } else {
+                            // 经验已满，停止挂机
+                            Intent intent = new Intent(MainActivity.this, LiveWatchService.class);
+                            intent.putExtra("uperId", uperId);
+                            intent.putExtra("action", "stop");
+                            startService(intent);
+                            checkAndUpdateUI(index, "");
                         }
                     } else {
                         checkAndUpdateUI(index, "");
@@ -358,21 +316,7 @@ public class MainActivity extends AppCompatActivity {
             runOnUiThread(() -> {
                 liveListText.setText(finalStringBuilder.toString());
                 
-                // 获取当前在线的主播ID集合
-                Set<String> currentLiveUperIds = new HashSet<>(liveIdMap.keySet());
-                
-                // 清理不在直播列表中的直播间
-                for (String uperId : new HashSet<>(LiveWatchService.roomStatuses.keySet())) {
-                    if (!currentLiveUperIds.contains(uperId)) {
-                        Log.d(TAG, "主播已下播或经验已满，停止观看: " + uperId);
-                        Intent intent = new Intent(this, LiveWatchService.class);
-                        intent.putExtra("uperId", uperId);
-                        intent.putExtra("action", "stop");
-                        startService(intent);
-                    }
-                }
-                
-                // 启动服务
+                // 在UI线程中启动服务，移除检查
                 for (Map.Entry<String, String> entry : liveIdMap.entrySet()) {
                     Intent intent = new Intent(this, LiveWatchService.class);
                     intent.putExtra("uperId", entry.getKey());
@@ -381,35 +325,5 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
         }
-    }
-    
-    private void updateRuntime() {
-        long currentTime = System.currentTimeMillis();
-        long diffTime = currentTime - startTimeMillis;
-        
-        // 转换为时分秒格式
-        long seconds = diffTime / 1000;
-        long minutes = seconds / 60;
-        long hours = minutes / 60;
-        seconds = seconds % 60;
-        minutes = minutes % 60;
-        
-        String runtime = String.format("%02d:%02d:%02d", hours, minutes, seconds);
-        
-        // 更新UI，把两个时间放在同一行
-        runOnUiThread(() -> {
-            runtimeText.setText(String.format("开始时间: %s    已运行: %s", 
-                              startTime, runtime));
-        });
-    }
-    
-    // 判断是否是同一天
-    private boolean isSameDay(long time1, long time2) {
-        java.util.Calendar cal1 = java.util.Calendar.getInstance();
-        cal1.setTimeInMillis(time1);
-        java.util.Calendar cal2 = java.util.Calendar.getInstance();
-        cal2.setTimeInMillis(time2);
-        return cal1.get(java.util.Calendar.YEAR) == cal2.get(java.util.Calendar.YEAR) &&
-               cal1.get(java.util.Calendar.DAY_OF_YEAR) == cal2.get(java.util.Calendar.DAY_OF_YEAR);
     }
 }

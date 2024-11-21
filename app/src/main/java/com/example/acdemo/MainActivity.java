@@ -135,15 +135,6 @@ public class MainActivity extends AppCompatActivity {
         
         // 添加点击事件监听
         toggleStatsText.setOnClickListener(v -> toggleStatsView());
-        
-        // 启动定时检查服务状态的任务
-        new Handler().postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                checkServiceRunning();
-                new Handler().postDelayed(this, 30000); // 每30秒检查一次
-            }
-        }, 30000);
     }
     
     private void startPeriodicRefresh() {
@@ -344,7 +335,7 @@ public class MainActivity extends AppCompatActivity {
                         if (!currentLiveUpers.contains(uperId) || data.degree >= 360) {
                             String reason = data.degree >= 360 ? 
                                 String.format("经验已满(%d)", data.degree) : "已下播";
-                            Log.d(TAG, String.format("主播 %s %s，关闭直播间", data.name, reason));
+                            Log.d(TAG, String.format("��播 %s %s，关闭直播��", data.name, reason));
                             stopWatching(uperId);
                             processedUperIds.add(uperId);
                         }
@@ -566,7 +557,7 @@ public class MainActivity extends AppCompatActivity {
             // 建显示文本
             for (Map.Entry<String, WatchStatsManager.WatchData> entry : sortedStats) {
                 WatchStatsManager.WatchData data = entry.getValue();
-                stats.append(String.format("【%s】今日经验值: %d/360\n", 
+                stats.append(String.format("【%s】今日��验值: %d/360\n", 
                     data.name, data.degree));
             }
             
@@ -582,22 +573,26 @@ public class MainActivity extends AppCompatActivity {
     }
     
     private void checkServiceRunning() {
+        // 如果是手动移除，不要重启服务
+        if (LiveWatchService.wasManuallyRemoved()) {
+            Logger.d(TAG, "服务被手动移除，不重启");
+            return;
+        }
+        
+        // 检查服务是否在运行
         ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
         boolean isServiceRunning = false;
-        
-        // 添加日志
-        Logger.d(TAG, "开始检查服务状态");
         
         for (ActivityManager.RunningServiceInfo service : manager.getRunningServices(Integer.MAX_VALUE)) {
             if (LiveWatchService.class.getName().equals(service.service.getClassName())) {
                 isServiceRunning = true;
-                Logger.i(TAG, "服务正在运行");
                 break;
             }
         }
         
-        if (!isServiceRunning) {
-            Logger.d(TAG, "服务未运行，正在重启...");
+        // 只有在服务不在运行且不是手动移除的情况下才重启
+        if (!isServiceRunning && !LiveWatchService.wasManuallyRemoved()) {
+            Logger.d(TAG, "服务未运行且非手动移除，正在重启...");
             Intent intent = new Intent(this, LiveWatchService.class);
             intent.putExtra("action", "restart");
             try {
@@ -612,6 +607,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        Logger.d(TAG, "Activity恢复，检查服务状态");
         checkServiceRunning();
     }
     
@@ -623,7 +619,7 @@ public class MainActivity extends AppCompatActivity {
             
             // 检查是否有后台运行权限
             if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                // 显示对话框提示用户
+                // 显示对��框提示用户
                 new AlertDialog.Builder(this)
                     .setTitle("需要允许后台运行")
                     .setMessage("为了保证功能正常运行，请在接下来的设置中允许应用后台运行")

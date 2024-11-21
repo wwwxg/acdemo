@@ -92,7 +92,26 @@ public class LiveWatchService extends Service {
     private final Runnable refreshRunnable = new Runnable() {
         @Override
         public void run() {
+            Logger.d(TAG, "执行定时刷新任务");
             fetchMedalList();
+            
+            // 添加延迟统计，确保在处理完列表后执行
+            mainHandler.postDelayed(() -> {
+                String webviewStats = String.format("定时刷新后WebView数量: %d, WebView列表: ", webviews.size());
+                StringBuilder statsBuilder = new StringBuilder(webviewStats);
+                
+                for (Map.Entry<String, WebView> entry : webviews.entrySet()) {
+                    String uperId = entry.getKey();
+                    WatchStatsManager.WatchData data = WatchStatsManager.getInstance(LiveWatchService.this)
+                        .getAllStats().get(uperId);
+                    String nickname = data != null ? data.name : uperId;
+                    statsBuilder.append(nickname).append("(").append(uperId).append("), ");
+                }
+                
+                Logger.i(TAG, statsBuilder.toString());
+                LogUtils.logEvent("WEBVIEW_STATS", statsBuilder.toString());
+            }, 10000); // 延迟10秒���确保在处理完列表后执行
+            
             mainHandler.postDelayed(this, REFRESH_INTERVAL);
         }
     };
@@ -108,17 +127,50 @@ public class LiveWatchService extends Service {
     private final Runnable serviceCheckRunnable = new Runnable() {
         @Override
         public void run() {
+            // 检查服务状态
             if (!isServiceRunning()) {
+                Logger.d(TAG, "服务未运行，尝试重启");
                 Intent intent = new Intent(getApplicationContext(), LiveWatchService.class);
                 intent.putExtra("action", "restart");
                 startForegroundService(intent);
             }
+            
             mainHandler.postDelayed(this, 5 * 60 * 1000);
         }
     };
     
+    private static boolean isManuallyRemoved = false;
+    
+    public static void setManuallyRemoved(boolean value) {
+        isManuallyRemoved = value;
+    }
+    
+    public static boolean wasManuallyRemoved() {
+        return isManuallyRemoved;
+    }
+    
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        // 设置标记表示是用户手动移除
+        setManuallyRemoved(true);
+        
+        // 停止所有观看
+        for (String uperId : new HashSet<>(webviews.keySet())) {
+            stopWatching(uperId);
+        }
+        
+        // 停止服务
+        stopSelf();
+        
+        // 记录日志
+        LogUtils.logEvent("SERVICE", "用户手动移除服务");
+        
+        super.onTaskRemoved(rootIntent);
+    }
+    
     @Override
     public void onCreate() {
+        setManuallyRemoved(false); // 重置标记
         super.onCreate();
         
         // 添加更多的日志检查
@@ -175,7 +227,7 @@ public class LiveWatchService extends Service {
             LogUtils.logEvent("SERVICE", "网络客户端已初始化");
             
             // 启动前台服务
-            Notification notification = createNotification("服务正在启动...");
+            Notification notification = createNotification();
             startForeground(NOTIFICATION_ID, notification);
             Logger.i(TAG, "前台服务启动完成");
             
@@ -207,6 +259,12 @@ public class LiveWatchService extends Service {
     }
     
     private void startTimers() {
+        // 停止现有的定时器
+        mainHandler.removeCallbacks(refreshRunnable);
+        mainHandler.removeCallbacks(notificationUpdateRunnable);
+        mainHandler.removeCallbacks(serviceCheckRunnable);
+        
+        // 重新启动定时器
         mainHandler.post(refreshRunnable);
         mainHandler.post(notificationUpdateRunnable);
         mainHandler.post(serviceCheckRunnable);
@@ -248,33 +306,44 @@ public class LiveWatchService extends Service {
     private void startWatching(String liveId, String uperId, String nickname) {
         // 参数验证
         if (liveId == null || uperId == null || nickname == null) {
-            Logger.e(TAG, String.format("无效的参数 - liveId: %s, uperId: %s, nickname: %s", 
-                liveId, uperId, nickname));
+            Logger.e(TAG, "无效的参数 - liveId: " + liveId + ", uperId: " + uperId + ", nickname: " + nickname);
             return;
         }
         
         // 检查是否已经在观看
         if (webviews.containsKey(uperId)) {
-            // 已存在时不再记录日志，因为不是新建的WebView
+            Logger.d(TAG, "已存在WebView，跳过创建: " + nickname + "(" + uperId + ")");
             return;
         }
         
-        // 在主线程中创建WebView
-        new Handler(Looper.getMainLooper()).post(() -> {
-            WebView webView = createWebView();
-            if (webView != null) {
-                setupWebView(webView, uperId);
-                webviews.put(uperId, webView);
-                loadLiveRoom(webView, liveId, uperId);
-                
-                // 只在真正创建新WebView时记录日志
-                Logger.i(TAG, String.format("创建新WebView并开始观看: %s(%s)", nickname, uperId));
-                LogUtils.logEvent("WATCH", String.format("创建WebView开始观看: %s(%s)", nickname, uperId));
-                
-                // 更新通知栏
-                updateNotification();
-            }
-        });
+        // 检查是否在主线程
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            createAndSetupWebView(liveId, uperId, nickname);
+        } else {
+            new Handler(Looper.getMainLooper()).post(() -> 
+                createAndSetupWebView(liveId, uperId, nickname));
+        }
+    }
+    
+    // 将WebView创建逻辑抽取到单独的方法
+    private void createAndSetupWebView(String liveId, String uperId, String nickname) {
+        // 再次检查，防止在切换线程期间创建了WebView
+        if (webviews.containsKey(uperId)) {
+            Logger.d(TAG, "切换线程后已存在WebView，跳过创建: " + nickname + "(" + uperId + ")");
+            return;
+        }
+        
+        WebView webView = createWebView();
+        if (webView != null) {
+            setupWebView(webView, uperId);
+            webviews.put(uperId, webView);
+            loadLiveRoom(webView, liveId, uperId);
+            
+            Logger.i(TAG, "创建新WebView并开始观看: " + nickname + "(" + uperId + ")");
+            LogUtils.logEvent("WATCH", "创建WebView开始观看: " + nickname + "(" + uperId + ")");
+            
+            updateNotification();
+        }
     }
     
     private WebView createWebView() {
@@ -335,7 +404,7 @@ public class LiveWatchService extends Service {
                     }
                 }
             }
-        }, 30000, 30000); // 每30秒检查一次心跳状态
+        }, 30000, 30000); // 每30秒检查一次心跳态
         watchingTimers.put(uperId, heartbeatTimer);
     }
 
@@ -353,13 +422,23 @@ public class LiveWatchService extends Service {
     @Override
     public void onDestroy() {
         LogUtils.logEvent("SERVICE", "服务停止");
-        LogUtils.stopMemoryLogging();
         
+        // 先移除所有回调
+        mainHandler.removeCallbacks(refreshRunnable);
+        mainHandler.removeCallbacks(notificationUpdateRunnable);
+        mainHandler.removeCallbacks(serviceCheckRunnable);
+        
+        // 停止所有观看
+        for (String uperId : new HashSet<>(webviews.keySet())) {
+            stopWatching(uperId);
+        }
+        
+        // 清理其他资源
         if (wakeLock != null && wakeLock.isHeld()) {
             try {
                 wakeLock.release();
             } catch (Exception e) {
-                Log.e(TAG, "释放WakeLock失败", e);
+                Logger.e(TAG, "释放WakeLock失败: " + e.getMessage());
             }
         }
         
@@ -370,105 +449,123 @@ public class LiveWatchService extends Service {
                     (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
                 connectivityManager.unregisterNetworkCallback(networkCallback);
             } catch (Exception e) {
-                Log.e(TAG, "注销网络回调失败", e);
+                Logger.e(TAG, "注销网络回调失败: " + e.getMessage());
             }
         }
         
-        WindowManager windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
-        for (WebView webView : webviews.values()) {
-            windowManager.removeView(webView);
-            webView.destroy();
-        }
-        webviews.clear();
-        
-        for (Timer timer : watchingTimers.values()) {
-            timer.cancel();
-        }
-        watchingTimers.clear();
-        mainHandler.removeCallbacks(notificationUpdateRunnable);
-        
-        // 清理心跳日志记录时间Map
-        lastHeartbeatLogTimes.clear();
-        
+        LogUtils.stopMemoryLogging();
         super.onDestroy();
-        mainHandler.removeCallbacks(refreshRunnable);
+    }
+
+    private void createNotificationChannel() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                "live_watch_service",
+                "AcFun挂机服务",
+                NotificationManager.IMPORTANCE_LOW
+            );
+            channel.setDescription("用于显示服务运行状态");
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            manager.createNotificationChannel(channel);
+        }
     }
 
     private Notification createNotification() {
-        NotificationChannel channel = new NotificationChannel(
-            "acdemo_service", 
-            "AcFun挂机服务",
-            NotificationManager.IMPORTANCE_LOW
+        // 确保通知渠道已创建
+        createNotificationChannel();
+        
+        // 创建PendingIntent
+        Intent notificationIntent = new Intent(this, MainActivity.class);
+        PendingIntent pendingIntent = PendingIntent.getActivity(
+            this, 
+            0, 
+            notificationIntent, 
+            PendingIntent.FLAG_IMMUTABLE
         );
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        manager.createNotificationChannel(channel);
 
-        // 获取当前正在挂机的数量和主播名字列表
+        // 获取当前时间
+        String currentTime = new SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+            .format(new Date());
+
+        // 构建通知内容
         int watchingCount = webviews.size();
         StringBuilder namesBuilder = new StringBuilder();
         
-        // 使用正确的包路径
-        WatchStatsManager statsManager = WatchStatsManager.getInstance(this);
-        Map<String, WatchStatsManager.WatchData> allStats = statsManager.getAllStats();
-        
-        for (String uperId : webviews.keySet()) {
-            WatchStatsManager.WatchData data = allStats.get(uperId);
-            String name = data != null ? data.name : uperId;
-            namesBuilder.append(name).append("\n");
+        for (Map.Entry<String, WebView> entry : webviews.entrySet()) {
+            String uperId = entry.getKey();
+            WatchStatsManager.WatchData data = WatchStatsManager.getInstance(this).getAllStats().get(uperId);
+            if (data != null) {
+                namesBuilder.append(data.name)
+                           .append("(").append(data.degree).append("/360)")
+                           .append("\n");
+            }
         }
         
-        String contentText = String.format("正在挂%d个牌子", watchingCount);
-        String expandedText;
-        if (watchingCount > 0) {
-            expandedText = String.format("正在挂%d个牌子:\n%s", watchingCount, namesBuilder.toString());
-        } else {
-            expandedText = "当前没挂牌子";
-        }
+        String contentText = watchingCount > 0 ? 
+            String.format("[%s] 正在挂%d个牌子", currentTime, watchingCount) : 
+            String.format("[%s] 服务正在运行", currentTime);
+        
+        String expandedText = watchingCount > 0 ? 
+            String.format("[%s] 正在挂%d个牌子:\n%s", currentTime, watchingCount, namesBuilder.toString()) : 
+            String.format("[%s] 当前没有挂牌子", currentTime);
 
-        return new NotificationCompat.Builder(this, "acdemo_service")
+        // 构建通知
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, "live_watch_service")
             .setContentTitle("AcFun粉丝牌助手")
             .setContentText(contentText)
             .setStyle(new NotificationCompat.BigTextStyle().bigText(expandedText))
             .setSmallIcon(R.mipmap.ic_launcher)
-            .build();
+            .setContentIntent(pendingIntent)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true);
+
+        return builder.build();
+    }
+
+    // 更新通知的方法
+    private void updateNotification() {
+        try {
+            NotificationManager notificationManager = 
+                (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            Notification notification = createNotification();
+            notificationManager.notify(NOTIFICATION_ID, notification);
+        } catch (Exception e) {
+            Logger.e(TAG, "更新通知失败: " + e.getMessage());
+        }
     }
 
     private void stopWatching(String uperId) {
-        WebView webView = webviews.remove(uperId);
+        WebView webView = webviews.remove(uperId);  // 先从Map中移除
         if (webView != null) {
             // 在主线程中安全地清理和销毁WebView
             new Handler(Looper.getMainLooper()).post(() -> {
                 try {
-                    // 先停止所有加载和JavaScript
+                    // 先从窗口移除
+                    WindowManager windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+                    try {
+                        windowManager.removeView(webView);
+                    } catch (Exception e) {
+                        Logger.e(TAG, "移除WebView视图失败: " + e.getMessage());
+                    }
+                    
+                    // 然后清理WebView
                     webView.stopLoading();
                     webView.getSettings().setJavaScriptEnabled(false);
-                    
-                    // 清理WebView内容
                     webView.loadUrl("about:blank");
                     webView.clearHistory();
                     webView.clearCache(true);
                     webView.clearFormData();
                     webView.clearSslPreferences();
-                    
-                    // 移除所有JavaScript接口
                     webView.removeJavascriptInterface("android");
-                    
-                    // 从窗口移除
-                    WindowManager windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
-                    windowManager.removeView(webView);
-                    
-                    // 移除所有View
                     webView.removeAllViews();
-                    
-                    // 最后销毁
                     webView.destroy();
                     
                     // 记录日志
                     WatchStatsManager statsManager = WatchStatsManager.getInstance(LiveWatchService.this);
                     WatchStatsManager.WatchData data = statsManager.getAllStats().get(uperId);
                     String nickname = data != null ? data.name : uperId;
-                    Logger.i(TAG, String.format("已销毁WebView并停止观看: %s(%s)", nickname, uperId));
-                    LogUtils.logEvent("WATCH", String.format("销毁WebView停止观看: %s(%s)", nickname, uperId));
+                    Logger.i(TAG, "已销毁WebView并停止观看: " + nickname + "(" + uperId + ")");
+                    LogUtils.logEvent("WATCH", "销毁WebView停止观看: " + nickname + "(" + uperId + ")");
                 } catch (Exception e) {
                     Logger.e(TAG, "清理WebView失败: " + e.getMessage());
                 }
@@ -484,8 +581,14 @@ public class LiveWatchService extends Service {
         lastHeartbeatLogTimes.remove(uperId);
         roomStatuses.remove(uperId);
         
-        // 更新通知栏
-        updateNotification();
+        // 延迟更新通知，确保WebView已经完全清理
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            try {
+                updateNotification();
+            } catch (Exception e) {
+                Logger.e(TAG, "更新通知失败: " + e.getMessage());
+            }
+        }, 500);
     }
 
     private void registerNetworkCallback() {
@@ -520,49 +623,6 @@ public class LiveWatchService extends Service {
         }
     }
 
-    private void updateNotification() {
-        NotificationManager notificationManager = 
-            (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-            
-        // 获取当前时间
-        String currentTime = new SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-            .format(new Date());
-            
-        // 获取正在看的直播数量
-        int watchingCount = webviews.size();
-        
-        StringBuilder namesBuilder = new StringBuilder();
-        WatchStatsManager statsManager = WatchStatsManager.getInstance(this);
-        Map<String, WatchStatsManager.WatchData> allStats = statsManager.getAllStats();
-        
-        for (String uperId : webviews.keySet()) {
-            WatchStatsManager.WatchData data = allStats.get(uperId);
-            String name = data != null ? data.name : uperId;
-            namesBuilder.append(name).append("\n");
-        }
-        
-        // 修改这里，确保时间总是显示
-        String contentText = String.format("正在挂牌子 [%s]", currentTime);
-        String expandedText;
-        if (watchingCount > 0) {
-            expandedText = String.format("正在挂%d个牌子:\n%s\n更新时间: %s", 
-                watchingCount, namesBuilder.toString(), currentTime);
-        } else {
-            expandedText = String.format("当前没有挂牌子\n更新时间: %s", currentTime);
-        }
-
-        // 创建通知
-        Notification notification = new NotificationCompat.Builder(this, "acdemo_service")
-            .setContentTitle("AcFun粉丝牌助手")
-            .setContentText(contentText)
-            .setStyle(new NotificationCompat.BigTextStyle().bigText(expandedText))
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setOngoing(true)  // 设置为持续通知
-            .build();
-
-        notificationManager.notify(NOTIFICATION_ID, notification);
-    }
-
     // 添加服务状检查
     private void startServiceWatchdog() {
         new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
@@ -577,7 +637,7 @@ public class LiveWatchService extends Service {
                     Long lastHeartbeat = lastHeartbeatTimes.get(uperId);
                     long now = System.currentTimeMillis();
                     if (lastHeartbeat == null || now - lastHeartbeat > HEARTBEAT_TIMEOUT) {
-                        Logger.e(TAG, "检测到WebView心跳超时，重新加载: " + uperId);
+                        Logger.e(TAG, "检测WebView心跳超时，重新加载: " + uperId);
                         webView.reload();
                     }
                 }
@@ -588,23 +648,7 @@ public class LiveWatchService extends Service {
         }, 5 * 60 * 1000);
     }
 
-    // 添加重启恢复机制
-    @Override
-    public void onTaskRemoved(Intent rootIntent) {
-        Log.d(TAG, "Service task removed, scheduling restart");
-        Intent restartService = new Intent(getApplicationContext(), LiveWatchService.class);
-        restartService.setPackage(getPackageName());
-        PendingIntent restartServicePI = PendingIntent.getService(
-            getApplicationContext(), 1, restartService,
-            PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE);
-
-        AlarmManager alarmService = (AlarmManager) getApplicationContext()
-            .getSystemService(Context.ALARM_SERVICE);
-        alarmService.set(AlarmManager.ELAPSED_REALTIME,
-            SystemClock.elapsedRealtime() + 1000, restartServicePI);
-
-        super.onTaskRemoved(rootIntent);
-    }
+ 
 
     private void checkLiveStatus(String uperId) {
         String url = "https://live.acfun.cn/api/channel/list?count=1&filters=[%7B%22filterType%22:3,%22filterId%22:" + uperId + "%7D]";
@@ -640,21 +684,11 @@ public class LiveWatchService extends Service {
     }
 
     private void startServiceChecker() {
+        // 移除现有的检查任务
+        mainHandler.removeCallbacks(serviceCheckRunnable);
+        
+        mainHandler.postDelayed(serviceCheckRunnable, 5 * 60 * 1000);
         LogUtils.logSystemInfo("SERVICE", "Service checker started");
-        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                // 检查服务状态
-                if (!isServiceRunning()) {
-                    Intent intent = new Intent(getApplicationContext(), LiveWatchService.class);
-                    intent.putExtra("action", "restart");
-                    startForegroundService(intent);
-                }
-                
-                // 每5分钟检查一次
-                new Handler(Looper.getMainLooper()).postDelayed(this, 5 * 60 * 1000);
-            }
-        }, 5 * 60 * 1000);
     }
 
     private boolean isServiceRunning() {
@@ -669,40 +703,6 @@ public class LiveWatchService extends Service {
 
     private void startNotificationUpdate() {
         mainHandler.post(notificationUpdateRunnable);
-    }
-
-    private Notification createNotification(String content) {
-        // 创建通知渠道（Android 8.0及以上需要）
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                "live_watch_service",
-                "直播观看服务",
-                NotificationManager.IMPORTANCE_LOW
-            );
-            channel.setDescription("用于保持直播观看服务运行");
-            NotificationManager notificationManager = getSystemService(NotificationManager.class);
-            notificationManager.createNotificationChannel(channel);
-        }
-
-        // 创建点击通知时的意图
-        Intent notificationIntent = new Intent(this, MainActivity.class);
-        PendingIntent pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            notificationIntent,
-            PendingIntent.FLAG_IMMUTABLE
-        );
-
-        // 构建通知
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, "live_watch_service")
-            .setContentTitle("AcDemo 运行")
-            .setContentText(content)
-            .setSmallIcon(R.mipmap.ic_launcher) // 确保您有这个图标资源
-            .setContentIntent(pendingIntent)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(true);
-
-        return builder.build();
     }
 
     // 添加检查经验值是否满的方法
@@ -792,8 +792,8 @@ public class LiveWatchService extends Service {
                         WatchStatsManager.WatchData data = statsManager.getAllStats().get(uperId);
                         String displayName = data != null ? data.name : uperId;
                         
-                        Logger.i(TAG, String.format("收到直播间心跳: %s(%s)", displayName, uperId));
-                        LogUtils.logEvent("HEARTBEAT", String.format("%s(%s)", displayName, uperId));
+                        Logger.i(TAG, "收到直播间心跳: " + displayName + "(" + uperId + ")");
+                        LogUtils.logEvent("HEARTBEAT", "收到直播间心跳: " + displayName + "(" + uperId + ")");
                         
                         lastHeartbeatLogTimes.put(uperId, currentTime);
                     }
@@ -861,7 +861,7 @@ public class LiveWatchService extends Service {
                             medalUperIds.add(uperId);
                         }
                         
-                        Logger.i(TAG, String.format("获取%d个粉丝牌", medalUperIds.size()));
+                        Logger.i(TAG, "获取" + medalUperIds.size() + "个粉丝牌");
                         // 获取完粉丝牌列表后获取直播列表
                         fetchLiveList();
                     } else {
@@ -977,7 +977,7 @@ public class LiveWatchService extends Service {
                     }
                 }
             } catch (Exception e) {
-                Logger.e(TAG, "获取粉丝牌信息失败: " + info.nickname, e);
+                Logger.e(TAG, "获取粉丝牌信息失: " + info.nickname, e);
             }
         }
         
@@ -1002,6 +1002,21 @@ public class LiveWatchService extends Service {
         for (LiveUperInfo info : needWatchList) {
             startWatching(info.liveId, info.uperId, info.nickname);
         }
+        
+        // 添加WebView统计信息到日志
+        String webviewStats = String.format("当前WebView数量: %d, WebView列表: ", webviews.size());
+        StringBuilder statsBuilder = new StringBuilder(webviewStats);
+        
+        for (Map.Entry<String, WebView> entry : webviews.entrySet()) {
+            String uperId = entry.getKey();
+            WatchStatsManager.WatchData data = WatchStatsManager.getInstance(this).getAllStats().get(uperId);
+            String nickname = data != null ? data.name : uperId;
+            statsBuilder.append(nickname).append("(").append(uperId).append("), ");
+        }
+        
+        // 记录到日志
+        Logger.i(TAG, statsBuilder.toString());
+        LogUtils.logEvent("WEBVIEW_STATS", statsBuilder.toString());
     }
 
     // 修改数据类，添加 degree 字段

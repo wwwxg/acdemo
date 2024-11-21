@@ -19,7 +19,7 @@ public class WatchStats implements Comparable<WatchStats> {
     }
 
     public String getFormattedStats() {
-        return String.format("【%s】今日经验值: %d/360", uperName, watchDegree);
+        return String.format("【%s】经验值: %d/360", uperName, watchDegree);
     }
 
     public String getUperId() {

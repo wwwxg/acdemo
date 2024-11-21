@@ -13,11 +13,9 @@ public class App extends Application {
         CookieManager.init(this);
         LogUtils.init(this);
         
-        // 添加日志
         LogUtils.logEvent("APP", "应用程序启动");
         
-        // 如果有登录状态，直接启动服务
-        if (CookieManager.hasCookies()) {
+        if (CookieManager.hasCookies() && !LiveWatchService.wasManuallyRemoved()) {
             Intent serviceIntent = new Intent(this, LiveWatchService.class);
             serviceIntent.putExtra("action", "start");
             try {

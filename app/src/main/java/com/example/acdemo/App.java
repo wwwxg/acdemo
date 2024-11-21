@@ -15,15 +15,19 @@ public class App extends Application {
         
         LogUtils.logEvent("APP", "应用程序启动");
         
-        if (CookieManager.hasCookies() && !LiveWatchService.wasManuallyRemoved()) {
-            Intent serviceIntent = new Intent(this, LiveWatchService.class);
-            serviceIntent.putExtra("action", "start");
-            try {
-                startForegroundService(serviceIntent);
-                LogUtils.logEvent("APP", "服务启动请求已发送");
-            } catch (Exception e) {
-                LogUtils.logEvent("ERROR", "服务启动失败: " + e.getMessage());
-            }
+        if (CookieManager.hasCookies() && !LiveWatchService.wasManuallyRemoved(this)) {
+            startService();
+        }
+    }
+
+    private void startService() {
+        Intent serviceIntent = new Intent(this, LiveWatchService.class);
+        serviceIntent.putExtra("action", "start");
+        try {
+            startForegroundService(serviceIntent);
+            LogUtils.logEvent("APP", "服务启动请求已发送");
+        } catch (Exception e) {
+            LogUtils.logEvent("ERROR", "服务启动失败: " + e.getMessage());
         }
     }
 } 

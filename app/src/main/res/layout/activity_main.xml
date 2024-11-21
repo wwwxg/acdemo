@@ -29,15 +29,6 @@
         android:visibility="gone" />
 
     <TextView
-        android:id="@+id/runtimeText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:textSize="12sp"
-        android:singleLine="true"
-        android:ellipsize="end" />
-
-    <TextView
         android:id="@+id/toggleStatsText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

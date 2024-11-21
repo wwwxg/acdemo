@@ -33,13 +33,17 @@ import android.content.pm.ResolveInfo;
 import android.content.SharedPreferences;
 import com.example.acdemo.utils.LogUtils;
 import com.example.acdemo.utils.Logger;
+import android.os.Build;
+import android.provider.Settings;
+import android.net.Uri;
 
 
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "MainActivity";
     private TextView userInfoText;
     private TextView liveListText;
-    private TextView runtimeText;
+    private TextView statsText;
+    private TextView toggleStatsText;
     private OkHttpClient client;
     private static final String USER_INFO_API = "https://www.acfun.cn/rest/pc-direct/user/personalInfo";
     private static final String LIVE_LIST_API = "https://live.acfun.cn/api/channel/list?count=100&pcursor=&filters=[%7B%22filterType%22:3,+%22filterId%22:0%7D]";
@@ -54,14 +58,8 @@ public class MainActivity extends AppCompatActivity {
     private static final long REFRESH_INTERVAL = 120000; // 2分钟
     private Map<String, String> liveIdMap = new HashMap<>(); // 存储主播ID和直播间ID的映射
     
-    private static String startTime = null;  // 启动时间
-    private Handler runtimeHandler = new Handler();
-    private static long startTimeMillis; // 记启动的时间戳
-    
     private Map<String, Long> experienceFullUperIds = new HashMap<>(); // 记录经验值已满的ID和时间
     
-    private TextView statsText;
-    private TextView toggleStatsText;
     private boolean showingStats = false;
     
     private static final String PREFS_NAME = "AcDemoPrefs";
@@ -75,30 +73,22 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         LogUtils.logEvent("ACTIVITY", "MainActivity onCreate");
         
-        // 立即检查服务状态
+        // 1. 基础权限检查
+        checkNotificationPermission(); // 通知权限最基础
+
+        
+        // 2. 后台运行相关权限
+        checkBackgroundPermission();  // 后台运行权限
+        checkBatteryOptimization();   // 电池优化（封装成方法）
+        checkAutoStartPermission();   // 自启动权限
+        
+        // 3. 最后检查服务状态
         checkServiceRunning();
-        
-        // 检查各种权限
-        checkBackgroundPermission();  // 检查后台运行权限
-        checkAutoStartPermission();   // 检查自启动权限
-        
-        // 请求忽略电池优化
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-            String packageName = getPackageName();
-            android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
-            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                Intent intent = new Intent();
-                intent.setAction(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-                intent.setData(android.net.Uri.parse("package:" + packageName));
-                startActivity(intent);
-            }
-        }
         
         setContentView(R.layout.activity_main);
         
         userInfoText = findViewById(R.id.userInfoText);
         liveListText = findViewById(R.id.liveListText);
-        runtimeText = findViewById(R.id.runtimeText);
         statsText = findViewById(R.id.statsText);
         toggleStatsText = findViewById(R.id.toggleStatsText);
         
@@ -116,22 +106,6 @@ public class MainActivity extends AppCompatActivity {
         
         // 启动定时刷新
         startPeriodicRefresh();
-        
-        // 如果是第一次启动，记录启动时间
-        if (startTime == null) {
-            startTime = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
-                    .format(new java.util.Date());
-            startTimeMillis = System.currentTimeMillis();
-        }
-        
-        // 每秒更新运行时间
-        runtimeHandler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                updateRuntime();
-                runtimeHandler.postDelayed(this, 1000);
-            }
-        }, 1000);
         
         // 添加点击事件监听
         toggleStatsText.setOnClickListener(v -> toggleStatsView());
@@ -152,7 +126,6 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
         LogUtils.logEvent("ACTIVITY", "MainActivity onDestroy");
         refreshHandler.removeCallbacksAndMessages(null);
-        runtimeHandler.removeCallbacksAndMessages(null);
     }
     
     private void fetchUserInfo() {
@@ -335,8 +308,8 @@ public class MainActivity extends AppCompatActivity {
                         if (!currentLiveUpers.contains(uperId) || data.degree >= 360) {
                             String reason = data.degree >= 360 ? 
                                 String.format("经验已满(%d)", data.degree) : "已下播";
-                            Log.d(TAG, String.format("��播 %s %s，关闭直播��", data.name, reason));
-                            stopWatching(uperId);
+                            Log.d(TAG, String.format("主播 %s %s，关闭直播间", data.name, reason));
+                            LiveWatchService.stopWatchingStatic(this, uperId);
                             processedUperIds.add(uperId);
                         }
                     }
@@ -495,7 +468,7 @@ public class MainActivity extends AppCompatActivity {
                     String nickname = data != null ? data.name : uperId;
                     
                     // 记录开始观看
-                    LogUtils.logEvent("WATCH", String.format("开始观看: %s(%s)", nickname, uperId));
+                    // LogUtils.logEvent("WATCH", String.format("开始观看: %s(%s)", nickname, uperId));
                     //暂时注释
                     Intent intent = new Intent(this, LiveWatchService.class);
                     intent.putExtra("uperId", uperId);
@@ -505,26 +478,6 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
         }
-    }
-    
-    private void updateRuntime() {
-        long currentTime = System.currentTimeMillis();
-        long diffTime = currentTime - startTimeMillis;
-        
-        // 转换为时分秒格式
-        long seconds = diffTime / 1000;
-        long minutes = seconds / 60;
-        long hours = minutes / 60;
-        seconds = seconds % 60;
-        minutes = minutes % 60;
-        
-        String runtime = String.format("%02d:%02d:%02d", hours, minutes, seconds);
-        
-        // 更新UI，把两个时间放在同一行
-        runOnUiThread(() -> {
-            runtimeText.setText(String.format("开始时间: %s    已运行: %s", 
-                              startTime, runtime));
-        });
     }
     
     // 判断是否是同一天
@@ -557,7 +510,7 @@ public class MainActivity extends AppCompatActivity {
             // 建显示文本
             for (Map.Entry<String, WatchStatsManager.WatchData> entry : sortedStats) {
                 WatchStatsManager.WatchData data = entry.getValue();
-                stats.append(String.format("【%s】今日经验值: %d/360\n", 
+                stats.append(String.format("【%s】今日验值: %d/360\n",
                     data.name, data.degree));
             }
             
@@ -573,13 +526,6 @@ public class MainActivity extends AppCompatActivity {
     }
     
     private void checkServiceRunning() {
-        // 如果是手动移除，不要重启服务
-        if (LiveWatchService.wasManuallyRemoved()) {
-            Logger.d(TAG, "服务被手动移除，不重启");
-            return;
-        }
-        
-        // 检查服务是否在运行
         ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
         boolean isServiceRunning = false;
         
@@ -590,14 +536,14 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         
-        // 只有在服务不在运行且不是手动移除的情况下才重启
-        if (!isServiceRunning && !LiveWatchService.wasManuallyRemoved()) {
-            Logger.d(TAG, "服务未运行且非手动移除，正在重启...");
+        // 传入 this 作为 Context
+        if (!isServiceRunning && !LiveWatchService.wasManuallyRemoved(this)) {
+            Logger.d(TAG, "服务意外停止，正在重启...");
             Intent intent = new Intent(this, LiveWatchService.class);
             intent.putExtra("action", "restart");
             try {
                 startForegroundService(intent);
-                LogUtils.logEvent("SERVICE", "服务重启请求已发送");
+                LogUtils.logEvent("SERVICE", "服务意外停止重启");
             } catch (Exception e) {
                 LogUtils.logEvent("ERROR", "服务重启失败: " + e.getMessage());
             }
@@ -619,7 +565,7 @@ public class MainActivity extends AppCompatActivity {
             
             // 检查是否有后台运行权限
             if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                // 显示对��框提示用户
+                // 显示对话框提示用户
                 new AlertDialog.Builder(this)
                     .setTitle("需要允许后台运行")
                     .setMessage("为了保证功能正常运行，请在接下来的设置中允许应用后台运行")
@@ -642,54 +588,74 @@ public class MainActivity extends AppCompatActivity {
     }
     
     private void checkAutoStartPermission() {
-        // 检查是否已经提示过
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        if (prefs.getBoolean(KEY_AUTOSTART_CHECKED, false)) {
-            return;  // 如果已经提示过，直接返回
-        }
+        boolean autostartChecked = prefs.getBoolean(KEY_AUTOSTART_CHECKED, false);
 
-        String manufacturer = android.os.Build.MANUFACTURER.toLowerCase();
-        try {
-            Intent intent = new Intent();
-            if (manufacturer.contains("xiaomi")) {
-                intent.setComponent(new ComponentName("com.miui.securitycenter", 
-                    "com.miui.permcenter.autostart.AutoStartManagementActivity"));
-            } else if (manufacturer.contains("oppo")) {
-                intent.setComponent(new ComponentName("com.coloros.safecenter",
-                    "com.coloros.safecenter.permission.startup.StartupAppListActivity"));
-            } else if (manufacturer.contains("vivo")) {
-                intent.setComponent(new ComponentName("com.vivo.permissionmanager",
-                    "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"));
-            } else if (manufacturer.contains("huawei")) {
-                intent.setComponent(new ComponentName("com.huawei.systemmanager",
-                    "com.huawei.systemmanager.optimize.process.ProtectActivity"));
-            }
-            
-            List<ResolveInfo> activities = getPackageManager().queryIntentActivities(intent, 
-                PackageManager.MATCH_DEFAULT_ONLY);
-            if (activities.size() > 0) {
-                new AlertDialog.Builder(this)
-                    .setTitle("需要允许自启动权限")
-                    .setMessage("请在接下来的界面中允许应用自启动，以保证功能正常运行")
-                    .setPositiveButton("去设置", (dialog, which) -> {
-                        try {
-                            startActivity(intent);
-                            // 记录已经提示过
-                            prefs.edit().putBoolean(KEY_AUTOSTART_CHECKED, true).apply();
-                        } catch (Exception e) {
-                            Toast.makeText(this, "无法打开自启动设置界面", Toast.LENGTH_SHORT).show();
-                        }
-                    })
-                    .setNegativeButton("取消", (dialog, which) -> {
-                        // 用户取消也记录已提示，但给出提示
+        if (!autostartChecked) {
+            String manufacturer = android.os.Build.MANUFACTURER.toLowerCase();
+            try {
+                Intent intent = new Intent();
+                boolean shouldShowDialog = false;
+
+                if (manufacturer.contains("xiaomi")) {
+                    intent.setComponent(new ComponentName("com.miui.securitycenter",
+                        "com.miui.permcenter.autostart.AutoStartManagementActivity"));
+                    shouldShowDialog = true;
+                } else if (manufacturer.contains("oppo")) {
+                    intent.setComponent(new ComponentName("com.coloros.safecenter",
+                        "com.coloros.safecenter.permission.startup.StartupAppListActivity"));
+                    shouldShowDialog = true;
+                } else if (manufacturer.contains("vivo")) {
+                    intent.setComponent(new ComponentName("com.vivo.permissionmanager",
+                        "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"));
+                    shouldShowDialog = true;
+                } else if (manufacturer.contains("huawei")) {
+                    intent.setComponent(new ComponentName("com.huawei.systemmanager",
+                        "com.huawei.systemmanager.optimize.process.ProtectActivity"));
+                    shouldShowDialog = true;
+                }
+
+                if (shouldShowDialog) {
+                    List<ResolveInfo> activities = getPackageManager().queryIntentActivities(intent,
+                        PackageManager.MATCH_DEFAULT_ONLY);
+                        
+                    if (activities.size() > 0) {
+                        new AlertDialog.Builder(this)
+                            .setTitle("需要允许自启动权限")
+                            .setMessage("请在接下来的界面中允许应用自启动，以保证功能正常运行")
+                            .setPositiveButton("去设置", (dialog, which) -> {
+                                try {
+                                    startActivity(intent);
+                                    LogUtils.logEvent("PERMISSION", "用户前往设置自启动权限");
+                                } catch (Exception e) {
+                                    LogUtils.logEvent("ERROR", "打开自启动设置失败: " + e.getMessage());
+                                    Toast.makeText(this, "无法打开自启动设置界面", Toast.LENGTH_SHORT).show();
+                                }
+                            })
+                            .setNegativeButton("取消", (dialog, which) -> {
+                                Toast.makeText(MainActivity.this,
+                                    "未设置自启动可能会影响应用在后台运行", Toast.LENGTH_LONG).show();
+                                LogUtils.logEvent("PERMISSION", "用户取消设置自启动权限");
+                            })
+                            .setOnDismissListener(dialog -> {
+                                // 无论用户选择了什么，我们都标记为已检查
+                                prefs.edit().putBoolean(KEY_AUTOSTART_CHECKED, true).apply();
+                            })
+                            .show();
+                    } else {
+                        // 如果没有找到对应的设置界面，也标记为已检查
                         prefs.edit().putBoolean(KEY_AUTOSTART_CHECKED, true).apply();
-                        Toast.makeText(MainActivity.this, 
-                            "未设置自启动可能会影响应用在后运行", Toast.LENGTH_LONG).show();
-                    })
-                    .show();
+                    }
+                } else {
+                    // 如果不是需要特殊处理的品牌，也标记为已检查
+                    prefs.edit().putBoolean(KEY_AUTOSTART_CHECKED, true).apply();
+                }
+            } catch (Exception e) {
+                Logger.e(TAG, "检查自启动权限失败", e);
+                LogUtils.logEvent("ERROR", "检查自启动权限失败: " + e.getMessage());
+                // 发生错误时也标记为已检查，避免反复提示
+                prefs.edit().putBoolean(KEY_AUTOSTART_CHECKED, true).apply();
             }
-        } catch (Exception e) {
-            Log.e("MainActivity", "检查自启动权限失败", e);
         }
     }
     
@@ -702,15 +668,89 @@ public class MainActivity extends AppCompatActivity {
         }
     }
     
-    // 添加 stopWatching 方法
-    private void stopWatching(String uperId) {
-        Intent intent = new Intent(this, LiveWatchService.class);
-        intent.putExtra("uperId", uperId);
-        intent.putExtra("action", "stop");
-        startService(intent);
-    }
     
     private void handleNetworkError(Exception e) {
         LogUtils.logEvent("ERROR", "网络错误: " + e.getMessage());
+    }
+    
+    // 在 MainActivity 中添加这个方法
+    private void stopWatching(String uperId) {
+        Intent intent = new Intent(this, LiveWatchService.class);
+        intent.putExtra("action", "stop");
+        intent.putExtra("uperId", uperId);
+        startService(intent);
+    }
+    
+    // 添加通知权限检查方法
+    private void checkNotificationPermission() {
+        // 仅在 Android 13 及以上版本需要动态请求通知权限
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) 
+                    != PackageManager.PERMISSION_GRANTED) {
+                new AlertDialog.Builder(this)
+                    .setTitle("需要通知权限")
+                    .setMessage("为了保证服务长时间运行，请允许应用通知权限")
+                    .setPositiveButton("去设置", (dialog, which) -> {
+                        requestPermissions(
+                            new String[]{android.Manifest.permission.POST_NOTIFICATIONS},
+                            1001  // 请求码
+                        );
+                    })
+                    .setNegativeButton("取消", (dialog, which) -> {
+                        Toast.makeText(MainActivity.this, 
+                            "未授予通知权限可能影响服务后台运行", 
+                            Toast.LENGTH_LONG).show();
+                    })
+                    .show();
+            }
+        }
+    }
+    
+    // 添加权限请求结果处理
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 1001) {  // 通知权限的请求码
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                // 用户授予了权限
+                LogUtils.logEvent("PERMISSION", "通知权限已授予");
+            } else {
+                // 用户拒绝了权限
+                LogUtils.logEvent("PERMISSION", "通知权限被拒绝");
+                Toast.makeText(this, "未授予通知权限可能影响服务后台运行", 
+                    Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+    
+  
+    // 封装电池优化检查
+    private void checkBatteryOptimization() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            String packageName = getPackageName();
+            android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                new AlertDialog.Builder(this)
+                    .setTitle("需要忽略电池优化")
+                    .setMessage("请在接下来的界面中允许忽略电池优化，以保证应用正常运行")
+                    .setPositiveButton("去设置", (dialog, which) -> {
+                        try {
+                            Intent intent = new Intent();
+                            intent.setAction(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                            intent.setData(Uri.parse("package:" + packageName));
+                            startActivity(intent);
+                            LogUtils.logEvent("PERMISSION", "用户前往设置电池优化");
+                        } catch (Exception e) {
+                            LogUtils.logEvent("ERROR", "打开电池优化设置失败: " + e.getMessage());
+                            Toast.makeText(this, "无法打开电池优化设置", Toast.LENGTH_SHORT).show();
+                        }
+                    })
+                    .setNegativeButton("取消", (dialog, which) -> {
+                        Toast.makeText(this, "未关闭电池优化可能影响应用在后台运行", Toast.LENGTH_LONG).show();
+                        LogUtils.logEvent("PERMISSION", "用户取消设置电池优化");
+                    })
+                    .show();
+            }
+        }
     }
 }

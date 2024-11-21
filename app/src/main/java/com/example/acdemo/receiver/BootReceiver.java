@@ -14,9 +14,9 @@ public class BootReceiver extends BroadcastReceiver {
         String action = intent.getAction();
         Log.d(TAG, "Received action: " + action);
         
-        if (Intent.ACTION_BOOT_COMPLETED.equals(action) ||
-            Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) {
-            // 启动服务
+        if ((Intent.ACTION_BOOT_COMPLETED.equals(action) ||
+             Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) 
+            && !LiveWatchService.wasManuallyRemoved(context)) {
             Intent serviceIntent = new Intent(context, LiveWatchService.class);
             serviceIntent.putExtra("action", "restart");
             try {

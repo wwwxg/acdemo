@@ -38,7 +38,6 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebSettings;
 import android.content.Context;
-import android.webkit.WebResourceResponse;
 
 public class LiveWatchService extends Service {
     private static final String TAG = "AcDemo_LiveWatchService";
@@ -53,7 +52,9 @@ public class LiveWatchService extends Service {
     private android.os.PowerManager.WakeLock wakeLock;
     
     private Map<String, Long> ticketTimestamps = new HashMap<>();  // 记录ticket获取时间
+    private Map<String, Long> liveIdTimestamps = new HashMap<>();  // 记录liveId获取时间
     private static final long TICKET_EXPIRE_TIME = 3600000; // ticket有效期1小时
+    private static final long LIVEID_EXPIRE_TIME = 1800000; // liveId有效期30分钟
     
     @Override
     public void onCreate() {
@@ -100,8 +101,8 @@ public class LiveWatchService extends Service {
     }
     
     private void startWatching(String liveId, String uperId) {
-        // 检查是否已有有效的ticket
-        if (isTicketValid(uperId)) {
+        // 检查是否已有有效的ticket和liveId
+        if (isTicketValid(uperId) && isLiveIdValid(liveId, uperId)) {
             startPlayWithToken(liveId, uperId, null);
             return;
         }
@@ -158,14 +159,27 @@ public class LiveWatchService extends Service {
         return System.currentTimeMillis() - timestamp < TICKET_EXPIRE_TIME;
     }
     
+    private boolean isLiveIdValid(String liveId, String uperId) {
+        Long timestamp = liveIdTimestamps.get(uperId);
+        if (timestamp == null) return false;
+        return System.currentTimeMillis() - timestamp < LIVEID_EXPIRE_TIME;
+    }
+    
     private void onHeartbeatError(String uperId, String liveId) {
         // 心跳失败时，清除ticket并重新获取
         tickets.remove(uperId);
         ticketTimestamps.remove(uperId);
+        liveIdTimestamps.remove(uperId);
         startWatching(liveId, uperId);
     }
     
     private void startPlayWithToken(String liveId, String uperId, String midgroundToken) {
+        // 检查是否已经有这个直播间的WebView
+        if (webviews.containsKey(uperId)) {
+            Log.d(TAG, "WebView already exists for uperId: " + uperId);
+            return;
+        }
+
         new Handler(Looper.getMainLooper()).post(() -> {
             Log.d(TAG, "Starting watch with liveId: " + liveId + ", uperId: " + uperId);
             
@@ -185,7 +199,13 @@ public class LiveWatchService extends Service {
                 @Override
                 public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
                     String message = consoleMessage.message();
-                    Log.d(TAG, "Console: " + message);
+                    // 检测直播间状态
+                    if (message.contains("直播已结束") || message.contains("主播未开播")) {
+                        Log.d(TAG, "直播已结束或未开播，停止服务: " + uperId);
+                        stopWatching(uperId);
+                        return true;
+                    }
+                    
                     if (message.contains("liveCsCmd ZtLiveCsHeartbeat")) {
                         Log.d(TAG, "Detected heartbeat for uperId: " + uperId);
                         resetKeepAliveTimer(webView, uperId);
@@ -203,47 +223,17 @@ public class LiveWatchService extends Service {
                     // 更新状态
                     roomStatuses.put(uperId, true);
                     
-                    // 注入JS来优化流量使用
-                    String js = 
-                        "(() => {" +
-                        // 拦截视频流请求
-                        "const originalFetch = window.fetch;" +
-                        "window.fetch = async (url, options) => {" +
-                        "  if(url.includes('.flv') || url.includes('.m3u8')) {" +
-                        "    if(!url.includes('quality=10')) {" +  // 只允许最低画质
-                        "      return new Response();" + // 返回空响应
-                        "    }" +
-                        "  }" +
-                        "  return originalFetch(url, options);" +
-                        "};" +
-                        
-                        // 禁用视频和图片加载
-                        "const style = document.createElement('style');" +
-                        "style.innerHTML = 'video, iframe, img { display: none !important; }';" +
-                        "document.head.appendChild(style);" +
-                        
-                        // 修改播放器配置
-                        "if(window.playerConfig) {" +
-                        "  window.playerConfig.quality = 10;" + // 设置最低画质
-                        "  window.playerConfig.autoPlay = false;" + // 禁止自动播放
-                        "}" +
-                        
-                        // 保持心跳功能
-                        "window.keepAliveOnly = true;" +
-                        "})();";
-                        
+                    // 只隐藏视频元素
+                    String js = "var style = document.createElement('style');" +
+                               "style.innerHTML = 'video, iframe { display: none !important; }';" +
+                               "document.head.appendChild(style);";
                     webView.evaluateJavascript(js, null);
                 }
 
                 @Override
-                public WebResourceResponse shouldInterceptRequest(WebView view, String url) {
-                    // 拦截流媒体请求
-                    if (url.contains(".flv") || url.contains(".m3u8")) {
-                        if (!url.contains("quality=10")) {
-                            return new WebResourceResponse("text/plain", "UTF-8", null);
-                        }
-                    }
-                    return super.shouldInterceptRequest(view, url);
+                public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                    Log.e(TAG, "WebView error for uperId " + uperId + ": " + description);
+                    view.reload();
                 }
             });
             
@@ -274,15 +264,25 @@ public class LiveWatchService extends Service {
                             "(function() { return document.visibilityState; })();",
                             value -> {
                                 if (!"visible".equals(value)) {
-                                    Log.d(TAG, "Refreshing WebView for uperId: " + uperId);
-                                    webView.reload();
+                                    Log.d(TAG, "检查直播间状态: " + uperId);
+                                    webView.evaluateJavascript(
+                                        "(function() { return document.querySelector('.live-closed') !== null; })();",
+                                        isClosed -> {
+                                            if ("true".equals(isClosed)) {
+                                                Log.d(TAG, "直播已结束，停止服务: " + uperId);
+                                                stopWatching(uperId);
+                                            } else {
+                                                webView.reload();
+                                            }
+                                        }
+                                    );
                                 }
                             }
                         );
                     }
                 });
             }
-        }, 30000, 30000);
+        }, 60000, 60000);  // 改为1分钟检查一次
         watchingTimers.put(uperId + "_keepalive", timer);
     }
 
@@ -381,13 +381,38 @@ public class LiveWatchService extends Service {
     
     private String getLowestQualityStream(JSONObject playRes) {
         try {
-            JSONArray representations = playRes.getJSONArray("representations");
-            JSONObject lowestQuality = representations.getJSONObject(0);
-            return lowestQuality.getString("url");
+            String videoPlayResStr = playRes.getString("videoPlayRes");
+            JSONObject videoPlayRes = new JSONObject(videoPlayResStr);
+            JSONArray manifests = videoPlayRes.getJSONArray("liveAdaptiveManifest");
+            
+            if (manifests.length() > 0) {
+                JSONObject manifest = manifests.getJSONObject(0);
+                JSONObject adaptationSet = manifest.getJSONObject("adaptationSet");
+                JSONArray representations = adaptationSet.getJSONArray("representation");
+                
+                // 找到level值最小的流
+                JSONObject lowestQuality = representations.getJSONObject(0);
+                int lowestLevel = lowestQuality.getInt("level");
+                
+                for (int i = 1; i < representations.length(); i++) {
+                    JSONObject rep = representations.getJSONObject(i);
+                    int level = rep.getInt("level");
+                    if (level < lowestLevel) {
+                        lowestLevel = level;
+                        lowestQuality = rep;
+                    }
+                }
+                
+                Log.d(TAG, "选择画质: " + lowestQuality.getString("name") + 
+                          ", level: " + lowestQuality.getInt("level") + 
+                          ", bitrate: " + lowestQuality.getInt("bitrate"));
+                          
+                return lowestQuality.getString("url");
+            }
         } catch (Exception e) {
             Log.e(TAG, "解析流地址失败: " + e.getMessage());
-            return null;
         }
+        return null;
     }
     
     private String extractToken(String cookies, String tokenName) {

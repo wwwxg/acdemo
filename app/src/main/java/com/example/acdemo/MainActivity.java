@@ -40,6 +40,19 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        
+        // 请求忽略电池优化
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            String packageName = getPackageName();
+            android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                Intent intent = new Intent();
+                intent.setAction(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                intent.setData(android.net.Uri.parse("package:" + packageName));
+                startActivity(intent);
+            }
+        }
+        
         setContentView(R.layout.activity_main);
         
         userInfoText = findViewById(R.id.userInfoText);
@@ -59,18 +72,6 @@ public class MainActivity extends AppCompatActivity {
         
         // 启动定时刷新
         startPeriodicRefresh();
-        
-        // 请求忽略电池优化
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-            String packageName = getPackageName();
-            android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
-            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                Intent intent = new Intent();
-                intent.setAction(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-                intent.setData(android.net.Uri.parse("package:" + packageName));
-                startActivity(intent);
-            }
-        }
     }
     
     private void startPeriodicRefresh() {
@@ -280,6 +281,7 @@ public class MainActivity extends AppCompatActivity {
                         int watchLimit = medalInfo.getInt("liveWatchDegreeLimit");
                         
                         if (watchDegree < watchLimit) {
+                            // 获取直播间状态
                             boolean isInRoom = LiveWatchService.roomStatuses.containsKey(uperId);
                             String status = isInRoom ? " (已进入直播间)" : "";
                             
@@ -288,20 +290,18 @@ public class MainActivity extends AppCompatActivity {
                             liveIdMap.put(uperId, liveId);
                             checkAndUpdateUI(index, info);
                         } else {
-                            Log.d(TAG, "经验已满，停止挂机: " + uperId);
+                            // 经验已满，停止挂机
                             Intent intent = new Intent(MainActivity.this, LiveWatchService.class);
                             intent.putExtra("uperId", uperId);
                             intent.putExtra("action", "stop");
                             startService(intent);
-                            
-                            liveIdMap.remove(uperId);
                             checkAndUpdateUI(index, "");
                         }
                     } else {
                         checkAndUpdateUI(index, "");
                     }
                 } catch (Exception e) {
-                    Log.e(TAG, "解析粉丝牌信息失败: " + uperId, e);
+                    Log.e(TAG, "解析粉丝牌信息失败: " + uperId + ", json: " + json, e);
                     checkAndUpdateUI(index, "");
                 }
             }
@@ -316,7 +316,7 @@ public class MainActivity extends AppCompatActivity {
             runOnUiThread(() -> {
                 liveListText.setText(finalStringBuilder.toString());
                 
-                // 在UI线程中启动服务，移除权限检查
+                // 在UI线程中启动务，移除权���检查
                 for (Map.Entry<String, String> entry : liveIdMap.entrySet()) {
                     Intent intent = new Intent(this, LiveWatchService.class);
                     intent.putExtra("uperId", entry.getKey());

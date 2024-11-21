@@ -41,8 +41,8 @@ public class StatsManager {
     }
     
     public synchronized List<WatchStats> getTodayStats() {
-        ArrayList<WatchStats> sortedStats = new ArrayList<>(watchStatsMap.values());
-        Collections.sort(sortedStats);
+        List<WatchStats> sortedStats = new ArrayList<>(watchStatsMap.values());
+        Collections.sort(sortedStats);  // 使用 WatchStats 的 compareTo 方法排序
         return sortedStats;
     }
 } 

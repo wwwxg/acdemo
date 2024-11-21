@@ -1,9 +1,6 @@
 # AcFun 直播间挂机助手
 
 一个用于a站直播间自动挂牌子经验的 Android 应用。
-请在右侧发行版下载apk文件进行安装。
-网盘链接：https://wwkl.lanzouw.com/b00wm4vjte
-密码:beym
 
 ## 功能特点
 

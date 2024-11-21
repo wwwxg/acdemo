@@ -38,24 +38,21 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebSettings;
 import android.content.Context;
+import com.example.acdemo.MainActivity;
+import android.net.ConnectivityManager;
+import android.net.Network;
 
 public class LiveWatchService extends Service {
     private static final String TAG = "AcDemo_LiveWatchService";
     private Map<String, Timer> watchingTimers = new HashMap<>();
-    private Map<String, String> tickets = new HashMap<>();
-    private OkHttpClient client;
     private Map<String, WebView> webviews = new HashMap<>();
-    
-    // 添加静态Map来存储直播间状态
+    private Map<String, Long> lastHeartbeatTimes = new HashMap<>();
+    private static final long HEARTBEAT_TIMEOUT = 90000;
     public static Map<String, Boolean> roomStatuses = new HashMap<>();
-    
     private android.os.PowerManager.WakeLock wakeLock;
-    
-    private Map<String, Long> ticketTimestamps = new HashMap<>();  // 记录ticket获取时间
-    private Map<String, Long> liveIdTimestamps = new HashMap<>();  // 记录liveId获取时间
-    private static final long TICKET_EXPIRE_TIME = 3600000; // ticket有效期1小时
-    private static final long LIVEID_EXPIRE_TIME = 1800000; // liveId有效期30分钟
-    
+    private OkHttpClient client;
+    private ConnectivityManager.NetworkCallback networkCallback;
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -71,6 +68,8 @@ public class LiveWatchService extends Service {
                 .followSslRedirects(true)
                 .build();
         startForeground(1, createNotification());
+        
+        registerNetworkCallback();
     }
     
     @Override
@@ -85,11 +84,8 @@ public class LiveWatchService extends Service {
             String action = intent.getStringExtra("action");
             
             if ("stop".equals(action)) {
-                Timer timer = watchingTimers.remove(uperId);
-                if (timer != null) {
-                    timer.cancel();
-                    Log.d(TAG, "Stopped watching for uperId: " + uperId);
-                }
+                stopWatching(uperId);
+                Log.d(TAG, "Stopped watching for uperId: " + uperId);
             } else {
                 String liveId = intent.getStringExtra("liveId");
                 if (liveId != null && !watchingTimers.containsKey(uperId)) {
@@ -101,93 +97,34 @@ public class LiveWatchService extends Service {
     }
     
     private void startWatching(String liveId, String uperId) {
-        // 检查是否已有有效的ticket和liveId
-        if (isTicketValid(uperId) && isLiveIdValid(liveId, uperId)) {
-            startPlayWithToken(liveId, uperId, null);
-            return;
-        }
-        
-        // 获取新的token和ticket
-        String cookies = com.example.acdemo.utils.CookieManager.getCookies();
-        Log.d(TAG, "Using cookies for token request: " + cookies);
-        
-        Request tokenRequest = new Request.Builder()
-            .url("https://id.app.acfun.cn/rest/web/token/get")
-            .header("Cookie", cookies)
-            .header("Accept", "application/json, text/plain, */*")
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("Origin", "https://live.acfun.cn")
-            .header("Referer", "https://live.acfun.cn/")
-            .header("sec-ch-ua", "\"Microsoft Edge\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
-            .header("sec-ch-ua-mobile", "?0")
-            .header("sec-ch-ua-platform", "\"Windows\"")
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0")
-            .post(new FormBody.Builder()
-                .add("sid", "acfun.midground.api")
-                .build())
-            .build();
-            
-        client.newCall(tokenRequest).enqueue(new Callback() {
-            @Override
-            public void onResponse(Call call, Response response) throws IOException {
-                String json = response.body().string();
-                Log.d(TAG, "Token response: " + json);
-                
-                try {
-                    JSONObject result = new JSONObject(json);
-                    if (result.getInt("result") == 0) {
-                        String midgroundToken = result.getString("acfun.midground.api_st");
-                            
-                        startPlayWithToken(liveId, uperId, midgroundToken);
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "Get token failed", e);
-                }
-            }
-            
-            @Override
-            public void onFailure(Call call, IOException e) {
-                Log.e(TAG, "Get token request failed", e);
-            }
-        });
-    }
-    
-    private boolean isTicketValid(String uperId) {
-        if (!tickets.containsKey(uperId)) return false;
-        Long timestamp = ticketTimestamps.get(uperId);
-        if (timestamp == null) return false;
-        return System.currentTimeMillis() - timestamp < TICKET_EXPIRE_TIME;
-    }
-    
-    private boolean isLiveIdValid(String liveId, String uperId) {
-        Long timestamp = liveIdTimestamps.get(uperId);
-        if (timestamp == null) return false;
-        return System.currentTimeMillis() - timestamp < LIVEID_EXPIRE_TIME;
-    }
-    
-    private void onHeartbeatError(String uperId, String liveId) {
-        // 心跳失败时，清除ticket并重新获取
-        tickets.remove(uperId);
-        ticketTimestamps.remove(uperId);
-        liveIdTimestamps.remove(uperId);
-        startWatching(liveId, uperId);
-    }
-    
-    private void startPlayWithToken(String liveId, String uperId, String midgroundToken) {
         // 检查是否已经有这个直播间的WebView
         if (webviews.containsKey(uperId)) {
             Log.d(TAG, "WebView already exists for uperId: " + uperId);
             return;
         }
+        
+        // 直接创建WebView并加载页面
+        startPlayWithToken(liveId, uperId);
+    }
+    
+    private void startPlayWithToken(String liveId, String uperId) {
+        if (webviews.containsKey(uperId)) {
+            return;
+        }
 
         new Handler(Looper.getMainLooper()).post(() -> {
-            Log.d(TAG, "Starting watch with liveId: " + liveId + ", uperId: " + uperId);
-            
             WebView webView = new WebView(this);
-            webView.getSettings().setJavaScriptEnabled(true);
-            webView.getSettings().setDomStorageEnabled(true);
+            WebSettings settings = webView.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setDomStorageEnabled(true);
             
-            webView.getSettings().setCacheMode(WebSettings.LOAD_NO_CACHE);
+            // 禁用图片载
+            settings.setLoadsImagesAutomatically(false);
+            settings.setBlockNetworkImage(true);
+            
+            // 禁用缓存
+            settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+            
             webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
             webView.getSettings().setMediaPlaybackRequiresUserGesture(true);
             
@@ -199,16 +136,10 @@ public class LiveWatchService extends Service {
                 @Override
                 public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
                     String message = consoleMessage.message();
-                    // 检测直播间状态
-                    if (message.contains("直播已结束") || message.contains("主播未开播")) {
-                        Log.d(TAG, "直播已结束或未开播，停止服务: " + uperId);
-                        stopWatching(uperId);
-                        return true;
-                    }
-                    
                     if (message.contains("liveCsCmd ZtLiveCsHeartbeat")) {
-                        Log.d(TAG, "Detected heartbeat for uperId: " + uperId);
-                        resetKeepAliveTimer(webView, uperId);
+                        String uperName = MainActivity.uperNames.getOrDefault(uperId, uperId);
+                        Log.d(TAG, String.format("收到直播间心跳: %s(%s)", uperName, uperId));
+                        lastHeartbeatTimes.put(uperId, System.currentTimeMillis());
                     }
                     return true;
                 }
@@ -223,7 +154,7 @@ public class LiveWatchService extends Service {
                     // 更新状态
                     roomStatuses.put(uperId, true);
                     
-                    // 只隐藏视频元素
+                    // 隐藏视频元素
                     String js = "var style = document.createElement('style');" +
                                "style.innerHTML = 'video, iframe { display: none !important; }';" +
                                "document.head.appendChild(style);";
@@ -247,174 +178,28 @@ public class LiveWatchService extends Service {
             WindowManager windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
             windowManager.addView(webView, params);
             webviews.put(uperId, webView);
-            webView.loadUrl("https://live.acfun.cn/live/" + uperId);
+            String liveUrl = String.format("https://live.acfun.cn/room/%s?theme=default&showAuthorclubOnly=", uperId);
+            webView.loadUrl(liveUrl);
             
-            startKeepAliveTimer(webView, uperId);
-        });
-    }
-
-    private void startKeepAliveTimer(WebView webView, String uperId) {
-        Timer timer = new Timer();
-        timer.scheduleAtFixedRate(new TimerTask() {
-            @Override
-            public void run() {
-                new Handler(Looper.getMainLooper()).post(() -> {
-                    if (webView != null) {
-                        webView.evaluateJavascript(
-                            "(function() { return document.visibilityState; })();",
-                            value -> {
-                                if (!"visible".equals(value)) {
-                                    Log.d(TAG, "检查直播间状态: " + uperId);
-                                    webView.evaluateJavascript(
-                                        "(function() { return document.querySelector('.live-closed') !== null; })();",
-                                        isClosed -> {
-                                            if ("true".equals(isClosed)) {
-                                                Log.d(TAG, "直播已结束，停止服务: " + uperId);
-                                                stopWatching(uperId);
-                                            } else {
-                                                webView.reload();
-                                            }
-                                        }
-                                    );
-                                }
-                            }
-                        );
-                    }
-                });
-            }
-        }, 60000, 60000);  // 改为1分钟检查一次
-        watchingTimers.put(uperId + "_keepalive", timer);
-    }
-
-    private void resetKeepAliveTimer(WebView webView, String uperId) {
-        Timer oldTimer = watchingTimers.remove(uperId + "_keepalive");
-        if (oldTimer != null) {
-            oldTimer.cancel();
-        }
-        startKeepAliveTimer(webView, uperId);
-    }
-
-    private void connectToStream(String streamUrl, String uperId) {
-        Request streamRequest = new Request.Builder()
-            .url(streamUrl)
-            .header("Origin", "https://live.acfun.cn")
-            .header("Referer", "https://live.acfun.cn/live/" + uperId)
-            .build();
-            
-        client.newCall(streamRequest).enqueue(new Callback() {
-            @Override
-            public void onResponse(Call call, Response response) throws IOException {
-                response.close();
-            }
-            
-            @Override
-            public void onFailure(Call call, IOException e) {
-                Log.e(TAG, "Stream connection failed", e);
-            }
-        });
-    }
-    
-    private void startHeartbeat(String uperId, String liveId) {
-        Log.d(TAG, "Starting heartbeat for uperId: " + uperId);
-        Timer timer = new Timer();
-        timer.scheduleAtFixedRate(new TimerTask() {
-            @Override
-            public void run() {
-                sendHeartbeat(uperId, liveId);
-            }
-        }, 0, 30000);
-        
-        watchingTimers.put(uperId, timer);
-    }
-    
-    private void sendHeartbeat(String uperId, String liveId) {
-        String cookies = com.example.acdemo.utils.CookieManager.getCookies();
-        String ticket = tickets.get(uperId);
-        
-        if (ticket == null) {
-            Log.w(TAG, "No ticket available for uperId: " + uperId);
-            return;
-        }
-        
-        Log.d(TAG, "Sending heartbeat for uperId: " + uperId);
-        
-        FormBody formBody = new FormBody.Builder()
-            .add("liveId", liveId)
-            .add("liveCsCmd", "ZtLiveCsHeartbeat")
-            .add("ticket", ticket)
-            .add("csrfToken", extractToken(cookies, "csrfToken"))
-            .build();
-
-        Request request = new Request.Builder()
-            .url("https://api.kuaishouzt.com/rest/zt/live/web/heartbeat")
-            .header("Cookie", cookies)
-            .header("Accept", "application/json, text/plain, */*")
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("Origin", "https://live.acfun.cn")
-            .header("Referer", "https://live.acfun.cn/live/" + uperId)
-            .post(formBody)
-            .build();
-            
-        client.newCall(request).enqueue(new Callback() {
-            @Override
-            public void onFailure(Call call, IOException e) {
-                Log.e(TAG, "Heartbeat failed for uperId: " + uperId, e);
-            }
-
-            @Override
-            public void onResponse(Call call, Response response) throws IOException {
-                try {
-                    String json = response.body().string();
-                    Log.d(TAG, "Heartbeat response for uperId " + uperId + ": " + json);
-                    JSONObject result = new JSONObject(json);
-                    if (result.getInt("result") == 1) {
-                        Log.d(TAG, "Heartbeat success for uperId: " + uperId);
-                    } else {
-                        Log.e(TAG, "Heartbeat error for uperId " + uperId + ": " + json);
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "Parse heartbeat response failed for uperId: " + uperId, e);
-                }
-            }
-        });
-    }
-    
-    private String getLowestQualityStream(JSONObject playRes) {
-        try {
-            String videoPlayResStr = playRes.getString("videoPlayRes");
-            JSONObject videoPlayRes = new JSONObject(videoPlayResStr);
-            JSONArray manifests = videoPlayRes.getJSONArray("liveAdaptiveManifest");
-            
-            if (manifests.length() > 0) {
-                JSONObject manifest = manifests.getJSONObject(0);
-                JSONObject adaptationSet = manifest.getJSONObject("adaptationSet");
-                JSONArray representations = adaptationSet.getJSONArray("representation");
-                
-                // 找到level值最小的流
-                JSONObject lowestQuality = representations.getJSONObject(0);
-                int lowestLevel = lowestQuality.getInt("level");
-                
-                for (int i = 1; i < representations.length(); i++) {
-                    JSONObject rep = representations.getJSONObject(i);
-                    int level = rep.getInt("level");
-                    if (level < lowestLevel) {
-                        lowestLevel = level;
-                        lowestQuality = rep;
+            // 启动心跳检测定时器
+            Timer heartbeatTimer = new Timer();
+            heartbeatTimer.scheduleAtFixedRate(new TimerTask() {
+                @Override
+                public void run() {
+                    Long lastHeartbeat = lastHeartbeatTimes.get(uperId);
+                    if (lastHeartbeat != null) {
+                        long now = System.currentTimeMillis();
+                        if (now - lastHeartbeat > HEARTBEAT_TIMEOUT) {
+                            Log.d(TAG, "直播间心跳超时，判定为已下播: " + uperId);
+                            new Handler(Looper.getMainLooper()).post(() -> stopWatching(uperId));
+                        }
                     }
                 }
-                
-                Log.d(TAG, "选择画质: " + lowestQuality.getString("name") + 
-                          ", level: " + lowestQuality.getInt("level") + 
-                          ", bitrate: " + lowestQuality.getInt("bitrate"));
-                          
-                return lowestQuality.getString("url");
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "解析流地址失败: " + e.getMessage());
-        }
-        return null;
+            }, 30000, 30000); // 每30秒检查一次心跳状态
+            watchingTimers.put(uperId, heartbeatTimer);
+        });
     }
-    
+
     private String extractToken(String cookies, String tokenName) {
         String[] pairs = cookies.split(";");
         for (String pair : pairs) {
@@ -442,8 +227,6 @@ public class LiveWatchService extends Service {
             timer.cancel();
         }
         watchingTimers.clear();
-        tickets.clear();
-        roomStatuses.clear();
         super.onDestroy();
     }
 
@@ -463,20 +246,6 @@ public class LiveWatchService extends Service {
             .build();
     }
 
-    private String getTicketFromStartPlayResponse(String json) {
-        try {
-            JSONObject result = new JSONObject(json);
-            if (result.getInt("result") == 1) {
-                JSONObject data = result.getJSONObject("data");
-                JSONArray tickets = data.getJSONArray("availableTickets");
-                return tickets.getString(0);
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Parse ticket failed", e);
-        }
-        return null;
-    }
-
     private void stopWatching(String uperId) {
         Log.d(TAG, "停止观看直播间: " + uperId);
         
@@ -486,11 +255,8 @@ public class LiveWatchService extends Service {
             timer.cancel();
         }
         
-        // 停止保活定时器
-        Timer keepAliveTimer = watchingTimers.remove(uperId + "_keepalive");
-        if (keepAliveTimer != null) {
-            keepAliveTimer.cancel();
-        }
+        // 除心跳记录
+        lastHeartbeatTimes.remove(uperId);
         
         // 移除WebView
         WebView webView = webviews.remove(uperId);
@@ -502,7 +268,22 @@ public class LiveWatchService extends Service {
         
         // 清除状态
         roomStatuses.remove(uperId);
-        tickets.remove(uperId);
-        ticketTimestamps.remove(uperId);
+    }
+
+    private void registerNetworkCallback() {
+        ConnectivityManager connectivityManager = 
+            (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onLost(Network network) {
+                Log.d(TAG, "网络断开，30秒后尝试重连");
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    for (Map.Entry<String, WebView> entry : webviews.entrySet()) {
+                        entry.getValue().reload();
+                    }
+                }, 30000);
+            }
+        };
     }
 } 

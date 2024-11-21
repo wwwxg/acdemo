@@ -277,7 +277,7 @@ public class LiveWatchService extends Service {
     
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        LogUtils.logEvent("SERVICE", "服务启动");
+        // LogUtils.logEvent("SERVICE", "服务启动");
         if (intent != null) {
             String action = intent.getStringExtra("action");
             String uperId = intent.getStringExtra("uperId");
@@ -285,10 +285,10 @@ public class LiveWatchService extends Service {
             String nickname = intent.getStringExtra("nickname");  // 获取传入的昵称
             
             // 记录服务操作
-            LogUtils.logEvent("SERVICE", String.format("操作: %s, 主播: %s(%s)", 
-                action != null ? action : "start", 
-                nickname != null ? nickname : uperId,
-                uperId));
+            // LogUtils.logEvent("SERVICE", String.format("操作: %s, 主播: %s(%s)", 
+            //     action != null ? action : "start", 
+            //     nickname != null ? nickname : uperId,
+            //     uperId));
             
             if ("start".equals(action) || (liveId != null && uperId != null)) {
                 startWatching(liveId, uperId, nickname);  // 修改这里的调用

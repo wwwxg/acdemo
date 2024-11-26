@@ -19,4 +19,8 @@ public class Logger {
     public static void e(String tag, String msg, Throwable tr) {
         Log.e(TAG_PREFIX + tag, msg, tr);
     }
+
+    public static void i(String tag, String msg) {
+        Log.i(TAG_PREFIX + tag, msg);
+    }
 } 

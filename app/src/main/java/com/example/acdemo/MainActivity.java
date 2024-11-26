@@ -557,7 +557,7 @@ public class MainActivity extends AppCompatActivity {
             // 建显示文本
             for (Map.Entry<String, WatchStatsManager.WatchData> entry : sortedStats) {
                 WatchStatsManager.WatchData data = entry.getValue();
-                stats.append(String.format("【%s】今日��验值: %d/360\n", 
+                stats.append(String.format("【%s】今日经验值: %d/360\n", 
                     data.name, data.degree));
             }
             

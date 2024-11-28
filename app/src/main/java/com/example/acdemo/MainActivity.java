@@ -638,7 +638,7 @@ public class MainActivity extends AppCompatActivity {
                                 LogUtils.logEvent("PERMISSION", "用户取消设置自启动权限");
                             })
                             .setOnDismissListener(dialog -> {
-                                // 无论用户选择了什么，我们都标记为已检查
+                                // 无论选择什么，都标记为已检查
                                 prefs.edit().putBoolean(KEY_AUTOSTART_CHECKED, true).apply();
                             })
                             .show();

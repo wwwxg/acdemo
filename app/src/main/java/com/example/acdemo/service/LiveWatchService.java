@@ -243,7 +243,7 @@ public class LiveWatchService extends Service {
             return;
         }
         
-        // ��录当前进程ID
+        // 记录当前进程ID
         prefs.edit().putInt(KEY_LAST_PID, currentPid).apply();
         
         setServiceRunning(this, true);
@@ -650,7 +650,7 @@ public class LiveWatchService extends Service {
             // 在主线程中安全地清理和销毁WebView
             new Handler(Looper.getMainLooper()).post(() -> {
                 try {
-                    // 先从窗口移��
+                    // 先从窗口移除
                     WindowManager windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
                     try {
                         windowManager.removeView(webView);

@@ -5,6 +5,7 @@ import android.util.Log;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.BufferedWriter;
+import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -13,6 +14,12 @@ import java.util.Calendar;
 import java.util.Timer;
 import java.util.TimerTask;
 import android.app.ActivityManager;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.nio.charset.StandardCharsets;
+import java.io.FileOutputStream;
+import java.io.OutputStreamWriter;
 
 public class LogUtils {
     private static final String TAG = "AcDemo_LogUtils";
@@ -22,7 +29,16 @@ public class LogUtils {
     private static final SimpleDateFormat fileNameFormat = new SimpleDateFormat("yyyy-MM-dd_HH", Locale.getDefault());
     
     private static Timer memoryLogTimer;
-    private static final long MEMORY_LOG_INTERVAL = 20 * 60 * 1000; // 20分钟
+    private static final long MEMORY_LOG_INTERVAL = 30 * 60 * 1000; // 20分钟
+    
+    private static final int BUFFER_SIZE = 16384; // 16KB缓冲区
+    private static final StringBuilder logBuffer = new StringBuilder(BUFFER_SIZE);
+    private static final ExecutorService logExecutor = Executors.newSingleThreadExecutor();
+    private static Timer flushTimer;
+    private static final long FLUSH_INTERVAL = 120000; // 120秒刷新一次缓冲区
+    
+    private static boolean isMemoryLoggingStarted = false;
+    private static volatile boolean isShuttingDown = false;
     
     public static void init(Context context) {
         File logDir = new File(context.getExternalFilesDir(null), "logs");
@@ -36,11 +52,11 @@ public class LogUtils {
         // 创建当前时段的日志文件
         updateLogFile(logDir);
         
-        // 启动定时更新日志文件的任务
-        startLogFileUpdateTask(logDir);
+
         
-        // 启动内存状态记录定时器
-        startMemoryLogging(context);
+
+        // 启动定时刷新
+        startFlushTimer();
     }
 
     private static void updateLogFile(File logDir) {
@@ -54,31 +70,7 @@ public class LogUtils {
         logFilePath = new File(logDir, "acdemo_" + timestamp + ".log").getAbsolutePath();
     }
 
-    private static void startLogFileUpdateTask(final File logDir) {
-        new Thread(() -> {
-            while (true) {
-                try {
-                    // 计算距离下一个2小时时段的时间
-                    Calendar next = Calendar.getInstance();
-                    next.add(Calendar.HOUR_OF_DAY, 1);
-                    next.set(Calendar.MINUTE, 0);
-                    next.set(Calendar.SECOND, 0);
-                    next.set(Calendar.MILLISECOND, 0);
-                    if (next.get(Calendar.HOUR_OF_DAY) % 2 != 0) {
-                        next.add(Calendar.HOUR_OF_DAY, 1);
-                    }
-                    
-                    long delay = next.getTimeInMillis() - System.currentTimeMillis();
-                    Thread.sleep(delay);
-                    
-                    // 更新日志文件
-                    updateLogFile(logDir);
-                } catch (InterruptedException e) {
-                    break;
-                }
-            }
-        }).start();
-    }
+  
 
     private static void cleanOldLogs(File logDir) {
         File[] files = logDir.listFiles();
@@ -97,75 +89,165 @@ public class LogUtils {
     public static void logEvent(String event, String details) {
         if (logFilePath == null) return;
         
-        String timeStamp = dateFormat.format(new Date());
-        String logMessage = String.format("%s [%s] %s\n", timeStamp, event, details);
+        final String logMessage = String.format("%s [%s] %s\n", 
+            dateFormat.format(new Date()), event, details);
+        
+        logExecutor.execute(() -> bufferLog(logMessage));
+    }
+    
+    private static void bufferLog(String message) {
+        synchronized (logBuffer) {
+            logBuffer.append(message);
+            // 如果缓冲区快满了，立即刷新
+            if (logBuffer.length() >= BUFFER_SIZE * 0.8) { // 80%阈值
+                flushBuffer();
+            }
+        }
+    }
+    
+    private static void flushBuffer() {
+        synchronized (logBuffer) {
+            if (logBuffer.length() == 0) return;
+            
+            try {
+                int bufferSize = logBuffer.length();
+                
+                BufferedWriter writer = new BufferedWriter(
+                    new OutputStreamWriter(
+                        new FileOutputStream(logFilePath, true), 
+                        StandardCharsets.UTF_8
+                    ),
+                    BUFFER_SIZE
+                );
+                writer.write(logBuffer.toString());
+                writer.flush();
+                writer.close();
+                
+                logBuffer.setLength(0);
+                
+                String sizeStr = bufferSize >= 1024 ? 
+                    String.format("%.2fKB", bufferSize / 1024.0) : 
+                    bufferSize + "字节";
+                Log.d(TAG, "日志写入完成: " + sizeStr);
+                
+            } catch (Exception e) {
+                Log.e(TAG, "刷新日志缓冲失败", e);
+            }
+        }
+    }
+    
+    
+    private static void startFlushTimer() {
+        if (flushTimer != null) {
+            flushTimer.cancel();
+        }
+        flushTimer = new Timer("LogFlushTimer");
+        flushTimer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                flushBuffer();
+            }
+        }, FLUSH_INTERVAL, FLUSH_INTERVAL);
+    }
+    
+    // 在服务停止时调用
+    public static synchronized void shutdown() {
+        // 防止重复关闭
+        if (isShuttingDown) {
+            Log.d(TAG, "日志系统已经在关闭过程中");
+            return;
+        }
+        isShuttingDown = true;
         
         try {
-            BufferedWriter writer = new BufferedWriter(new FileWriter(logFilePath, true));
-            writer.write(logMessage);
-            writer.close();
+            // 1. 先写入关闭事件到缓冲区
+            synchronized (logBuffer) {
+                String timestamp = dateFormat.format(new Date());
+                logBuffer.append(timestamp)
+                        .append(" [SERVICE] 日志系统开始关闭\n");
+            }
+            
+            // 2. 停止所有定时器
+            if (memoryLogTimer != null) {
+                memoryLogTimer.cancel();
+                memoryLogTimer = null;
+            }
+            if (flushTimer != null) {
+                flushTimer.cancel();
+                flushTimer = null;
+            }
+            
+            // 3. 立即写入缓冲区内容
+            writeBufferToDisk();
+            
+            // 4. 写入最终状态
+            try (BufferedWriter writer = new BufferedWriter(
+                    new OutputStreamWriter(
+                        new FileOutputStream(logFilePath, true),
+                        StandardCharsets.UTF_8
+                    ))) {
+                writer.write(String.format("%s [FINAL] 日志系统已关闭\n", 
+                    dateFormat.format(new Date())));
+                writer.flush();
+            }
+            
+            // 5. 最后才关闭执行器
+            if (logExecutor != null && !logExecutor.isShutdown()) {
+                logExecutor.shutdown();
+                try {
+                    logExecutor.awaitTermination(2, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    if (!logExecutor.isTerminated()) {
+                        logExecutor.shutdownNow();
+                    }
+                }
+            }
+
         } catch (Exception e) {
-            Log.e(TAG, "写入日志失败", e);
+            Log.e(TAG, "日志系统关闭过程出错", e);
         }
     }
 
-    // 添加系统信息日志方法
-    public static void logSystemInfo(String type, String message) {
+    // 添加一个辅助方法来写入缓冲区
+    private static void writeBufferToDisk() {
         if (logFilePath == null) return;
         
-        String timeStamp = dateFormat.format(new Date());
-        String threadInfo = String.format("%d-%d", Process.myPid(), Process.myTid());
-        String logMessage = String.format("%s [%s] [%s] %s\n", 
-            timeStamp, type, threadInfo, message);
-        
-        try {
-            BufferedWriter writer = new BufferedWriter(new FileWriter(logFilePath, true));
-            writer.write(logMessage);
-            writer.close();
-        } catch (Exception e) {
-            Log.e(TAG, "写入日志失败", e);
+        try (BufferedWriter writer = new BufferedWriter(
+                new OutputStreamWriter(
+                    new FileOutputStream(logFilePath, true),
+                    StandardCharsets.UTF_8
+                ),
+                BUFFER_SIZE
+            )) {
+            writer.write(logBuffer.toString());
+            writer.flush();
+            logBuffer.setLength(0);
+        } catch (IOException e) {
+            Log.e(TAG, "写入缓冲区失败", e);
         }
     }
-    
-    private static void startMemoryLogging(Context context) {
-        if (memoryLogTimer != null) {
-            memoryLogTimer.cancel();
-        }
+
+    // 添加一个公共方法供服务调用
+    public static void checkAndUpdateLogFile(File logDir) {
+        // 清理旧日志
+        cleanOldLogs(logDir);
         
-        memoryLogTimer = new Timer();
-        memoryLogTimer.scheduleAtFixedRate(new TimerTask() {
-            @Override
-            public void run() {
-                logMemoryStatus(context);
-            }
-        }, 0, MEMORY_LOG_INTERVAL);
-    }
-    
-    private static void logMemoryStatus(Context context) {
-        Runtime runtime = Runtime.getRuntime();
-        ActivityManager.MemoryInfo memoryInfo = new ActivityManager.MemoryInfo();
-        ActivityManager activityManager = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
-        activityManager.getMemoryInfo(memoryInfo);
+        // 检查当前时间，看是否需要创建新文件
+        String timestamp = fileNameFormat.format(new Date());
+        int hour = Integer.parseInt(timestamp.substring(timestamp.lastIndexOf("_") + 1));
+        hour = (hour / 2) * 2;
+        timestamp = timestamp.substring(0, timestamp.lastIndexOf("_") + 1) + String.format("%02d", hour);
         
-        long usedMemory = runtime.totalMemory() - runtime.freeMemory();
-        long maxMemory = runtime.maxMemory();
-        long availMemory = memoryInfo.availMem;
+        String newLogPath = new File(logDir, "acdemo_" + timestamp + ".log").getAbsolutePath();
         
-        logSystemInfo("MEMORY", String.format(
-            "已用: %dMB, 可用: %dMB, 总计: %dMB, 低内存: %b, 使用率: %.1f%%", 
-            usedMemory / 1024 / 1024,
-            availMemory / 1024 / 1024,
-            maxMemory / 1024 / 1024,
-            memoryInfo.lowMemory,
-            (usedMemory * 100.0f) / maxMemory
-        ));
-    }
-    
-    // 在服务停止时调用此方法
-    public static void stopMemoryLogging() {
-        if (memoryLogTimer != null) {
-            memoryLogTimer.cancel();
-            memoryLogTimer = null;
+        // 如果路径变化了，说明需要创建新文件
+        if (!newLogPath.equals(logFilePath)) {
+            // 先刷新旧文件的缓冲区
+            flushBuffer();
+            logFilePath = newLogPath;
+            Log.i(TAG, "创建新日志文件: " + logFilePath);
         }
     }
 } 

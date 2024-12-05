@@ -106,4 +106,9 @@ public class WatchStatsManager {
             cal.get(Calendar.DAY_OF_MONTH)
         );
     }
+
+    public String getNickname(String uperId) {
+        WatchData data = watchDataMap.get(uperId);
+        return data != null ? data.name : uperId;
+    }
 } 

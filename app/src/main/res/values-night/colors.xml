@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="mint">#7AC2AA</color>
+    <color name="mint_dark">#5BA189</color>
+    <color name="mint_light">#98D7C2</color>
+    <color name="background_color">#121212</color>
+    <color name="primary_color">@color/mint_light</color>
+    <color name="stop_button_color">@color/mint</color>
+    
+    <!-- 夜间模式的主题色 -->
+    <color name="purple_200">@color/mint_light</color>
+    <color name="purple_700">@color/mint_dark</color>
+    <color name="teal_200">@color/mint</color>
+</resources> 

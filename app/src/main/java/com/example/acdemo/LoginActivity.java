@@ -79,4 +79,18 @@ public class LoginActivity extends AppCompatActivity {
             super.onBackPressed();
         }
     }
+    
+    @Override
+    protected void onDestroy() {
+        if (webView != null) {
+            // 从父容器中移除 WebView
+            webView.stopLoading();
+            webView.loadUrl("about:blank");
+            webView.clearHistory();
+            webView.removeAllViews();
+            webView.destroy();
+            webView = null;
+        }
+        super.onDestroy();
+    }
 } 

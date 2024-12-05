@@ -18,11 +18,7 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.HashMap;
 import java.util.Map;
-import android.view.View;
-import com.example.acdemo.manager.StatsManager;
-import com.example.acdemo.model.WatchStats;
 import java.util.List;
-import com.example.acdemo.utils.WatchStatsManager;
 import java.util.ArrayList;
 import java.util.Collections;
 import android.app.ActivityManager;
@@ -36,8 +32,25 @@ import com.example.acdemo.utils.Logger;
 import android.os.Build;
 import android.provider.Settings;
 import android.net.Uri;
+import android.content.BroadcastReceiver;
+import android.content.IntentFilter;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import android.os.Looper;
+import android.view.View;
+import com.example.acdemo.databinding.ActivityMainBinding;
+import com.example.acdemo.utils.WatchStatsManager;
+import java.text.SimpleDateFormat;
+import java.util.Locale;
+import java.util.Date;
+import android.view.Menu;
+import android.view.MenuItem;
 
-
+/**
+ * 主界面
+ */
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "MainActivity";
     private TextView userInfoText;
@@ -55,7 +68,7 @@ public class MainActivity extends AppCompatActivity {
     
     private Set<String> medalUperIds = new HashSet<>();
     private Handler refreshHandler = new Handler();
-    private static final long REFRESH_INTERVAL = 120000; // 2分钟
+    private static final long REFRESH_INTERVAL = 180000; //3分钟
     private Map<String, String> liveIdMap = new HashMap<>(); // 存储主播ID和直播间ID的映射
     
     private Map<String, Long> experienceFullUperIds = new HashMap<>(); // 记录经验值已满的ID和时间
@@ -68,10 +81,40 @@ public class MainActivity extends AppCompatActivity {
     private Set<String> processedUperIds = new HashSet<>();
     private long lastClearDay = 0;  // 添加这个变量
     
+    private TextView updateTipText;
+    private static final String UPDATE_CHECK_URL = "https://gitee.com/api/v5/repos/without111/acdemo/releases/latest";
+    private static final String DOWNLOAD_BASE_URL = "https://gitee.com/without111/acdemo/releases/download/";
+    private static final String PREF_IGNORED_VERSION = "ignored_version";
+    
+    private BroadcastReceiver watchStatusReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (LiveWatchService.ACTION_WATCH_STATUS_CHANGED.equals(intent.getAction())) {
+                String uperId = intent.getStringExtra("uperId");
+                boolean isWatching = intent.getBooleanExtra("isWatching", false);
+                updateUIForWatchStatus(uperId, isWatching);
+            }
+        }
+    };
+    
+    private final ExecutorService networkExecutor = Executors.newFixedThreadPool(3);
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    
+    private ActivityMainBinding binding;
+    
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        binding = ActivityMainBinding.inflate(getLayoutInflater());
+        setContentView(binding.getRoot());
+        
         LogUtils.logEvent("ACTIVITY", "MainActivity onCreate");
+        
+        // 只有在未被手动停止时才启动服务
+        if (!LiveWatchService.isTemporaryStopped(this)) {
+            Intent serviceIntent = new Intent(this, LiveWatchService.class);
+            startService(serviceIntent);
+        }
         
         // 1. 基础权限检查
         checkNotificationPermission(); // 通知权限最基础
@@ -85,16 +128,19 @@ public class MainActivity extends AppCompatActivity {
         // 3. 最后检查服务状态
         checkServiceRunning();
         
-        setContentView(R.layout.activity_main);
-        
-        userInfoText = findViewById(R.id.userInfoText);
-        liveListText = findViewById(R.id.liveListText);
-        statsText = findViewById(R.id.statsText);
-        toggleStatsText = findViewById(R.id.toggleStatsText);
+        userInfoText = binding.userInfoText;
+        liveListText = binding.liveListText;
+        statsText = binding.statsText;
+        toggleStatsText = binding.toggleStatsText;
+        updateTipText = binding.updateTipText;
         
         client = new OkHttpClient.Builder()
                 .followRedirects(true)
                 .followSslRedirects(true)
+                .connectTimeout(30, TimeUnit.SECONDS)      // 增加连接超时时间
+                .readTimeout(30, TimeUnit.SECONDS)         // 增加读取超时时间
+                .writeTimeout(30, TimeUnit.SECONDS)        // 增加写入超时时间
+                .retryOnConnectionFailure(true)            // 启用连接失败重试
                 .build();
         
         String currentTime = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
@@ -108,7 +154,25 @@ public class MainActivity extends AppCompatActivity {
         startPeriodicRefresh();
         
         // 添加点击事件监听
-        toggleStatsText.setOnClickListener(v -> toggleStatsView());
+        binding.toggleStatsText.setOnClickListener(v -> toggleStatsView());
+        
+        // 初始化更新提示控件
+        updateTipText.setOnClickListener(v -> showUpdateDialog());
+        
+        // 检查更新
+        checkUpdate();
+        
+         // 注册关闭广播接收器
+        registerReceiver(finishReceiver, new IntentFilter("com.example.acdemo.ACTION_FINISH"));
+
+        // 注册广播接收器
+        registerReceiver(watchStatusReceiver, 
+            new IntentFilter(LiveWatchService.ACTION_WATCH_STATUS_CHANGED));
+        
+        // 初始化显示状态
+        binding.statsText.setVisibility(View.GONE);
+        binding.liveListText.setVisibility(View.VISIBLE);
+        binding.toggleStatsText.setText("点击查看统计信息");
     }
     
     private void startPeriodicRefresh() {
@@ -126,6 +190,14 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
         LogUtils.logEvent("ACTIVITY", "MainActivity onDestroy");
         refreshHandler.removeCallbacksAndMessages(null);
+        networkExecutor.shutdown();
+        mainHandler.removeCallbacksAndMessages(null);
+        binding = null;  // 避免内存泄漏
+         // 注销关闭广播接收器
+        unregisterReceiver(finishReceiver);
+        // 注销广播接收器
+        unregisterReceiver(watchStatusReceiver);
+
     }
     
     private void fetchUserInfo() {
@@ -178,7 +250,7 @@ public class MainActivity extends AppCompatActivity {
         client.newCall(request).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
-                Log.e(TAG, "获取粉丝牌列表失败", e);
+                Log.e(TAG, "获取粉牌列表失败", e);
                 runOnUiThread(() -> Toast.makeText(MainActivity.this, 
                     "获取粉丝牌列表失败: " + e.getMessage(), Toast.LENGTH_SHORT).show());
             }
@@ -199,7 +271,7 @@ public class MainActivity extends AppCompatActivity {
                             medalUperIds.add(uperId);
                         }
                         
-                        // 获取完粉丝牌列表后再获取直播列表
+                        // 获取完粉丝牌列后再获取直播列表
                         fetchLiveList();
                     }
                 } catch (Exception e) {
@@ -261,75 +333,51 @@ public class MainActivity extends AppCompatActivity {
         try {
             JSONObject response = new JSONObject(json);
             JSONObject channelListData = response.getJSONObject("channelListData");
-            if (channelListData.getInt("result") == 0) {
-                JSONArray liveList = channelListData.getJSONArray("liveList");
-                finalStringBuilder = new StringBuilder();
-                currentTime = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", 
-                    java.util.Locale.getDefault()).format(new java.util.Date());
-                finalStringBuilder.append("刷新时间: ").append(currentTime).append("\n\n");
+            JSONArray liveList = channelListData.getJSONArray("liveList");
+            
+            // 重置计数器和StringBuilder
+            pendingRequests = 0;
+            finalStringBuilder = new StringBuilder();
+            String currentTime = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", 
+                Locale.getDefault()).format(new Date());
+            finalStringBuilder.append("刷新时间: ").append(currentTime).append("\n\n");
+            
+            // 遍历直播列表
+            for (int i = 0; i < liveList.length(); i++) {
+                JSONObject live = liveList.getJSONObject(i);
+                JSONObject user = live.getJSONObject("user");
+                String uperId = user.getString("id");  // 修改这里：使用 "id" 而不是 "userId"
+                String nickname = user.getString("name");
+                String title = live.getString("title");
+                String liveId = live.getString("liveId");
                 
-                pendingRequests = 0;
-                liveIdMap.clear();
-                
-                // 记录当前在线的主播
-                Set<String> currentLiveUpers = new HashSet<>();
-                
-                // 处理在线主播
-                for (int i = 0; i < liveList.length(); i++) {
-                    JSONObject live = liveList.getJSONObject(i);
-                    String uperId = live.getString("authorId");
-                    JSONObject user = live.getJSONObject("user");
-                    
-                    if (user.getBoolean("isFollowing") && medalUperIds.contains(uperId)) {
-                        // 检查是否是同一天内已经满经验的主播
-                        Long fullTime = experienceFullUperIds.get(uperId);
-                        if (fullTime != null && isSameDay(fullTime, System.currentTimeMillis())) {
-                            continue;
-                        }
-                        
-                        currentLiveUpers.add(uperId);
-                        String nickname = user.getString("name");
-                        String title = live.getString("title");
-                        String liveId = live.getString("liveId");
-                        
-                        pendingRequests++;
-                        handleMedalInfo(uperId, nickname, title, liveId, pendingRequests - 1);
-                    }
-                }
-                
-                // 检查需要关闭的直播间
-                for (String uperId : new HashSet<>(LiveWatchService.roomStatuses.keySet())) {
-                    if (processedUperIds.contains(uperId)) {
-                        continue;
-                    }
-                    
-                    WatchStatsManager.WatchData data = WatchStatsManager.getInstance(this).getAllStats().get(uperId);
-                    if (data != null) {
-                        if (!currentLiveUpers.contains(uperId) || data.degree >= 360) {
-                            String reason = data.degree >= 360 ? 
-                                String.format("经验已满(%d)", data.degree) : "已下播";
-                            Log.d(TAG, String.format("主播 %s %s，关闭直播间", data.name, reason));
-                            LiveWatchService.stopWatchingStatic(this, uperId);
-                            processedUperIds.add(uperId);
-                        }
-                    }
-                }
-                
-                // 如果没有需要处理的主播，直接更新UI
-                if (pendingRequests == 0) {
-                    runOnUiThread(() -> {
-                        if (!showingStats) {
-                            finalStringBuilder.append("当前没有正在直播已关注主播");
-                            liveListText.setText(finalStringBuilder.toString());
-                        }
-                    });
+                // 只处理关注的主播
+                if (medalUperIds.contains(uperId)) {
+                    pendingRequests++;
+                    handleMedalInfo(uperId, nickname, title, liveId, pendingRequests);
                 }
             }
+            
+            // 如果没有需要理的主播
+            if (pendingRequests == 0) {
+                runOnUiThread(() -> {
+                    if (!showingStats && binding != null) {
+                        finalStringBuilder.append("当前没有正在直播的已关注主播");
+                        binding.liveListText.setText(finalStringBuilder.toString());
+                    }
+                    
+                    // 发送空的直播列表更新
+                    Intent updateIntent = new Intent(LiveWatchService.ACTION_UPDATE_WATCH_LIST);
+                    updateIntent.putExtra("liveMap", new HashMap<>(liveIdMap));
+                    sendBroadcast(updateIntent);
+                });
+            }
+            
         } catch (Exception e) {
-            Log.e(TAG, "解析直播列失败", e);
+            Logger.e(TAG, "解析直播列表失败", e);
             runOnUiThread(() -> {
-                if (!showingStats) {
-                    liveListText.setText("获直播列表失败，请查网络连接\n" + e.getMessage());
+                if (binding != null) {
+                    binding.liveListText.setText("获取数据失败，请检查网络连接");
                 }
             });
         }
@@ -436,46 +484,18 @@ public class MainActivity extends AppCompatActivity {
         
         if (pendingRequests == 0) {
             runOnUiThread(() -> {
-                // 只有在显示直播列表时才更新文本
-                if (!showingStats) {
-                    liveListText.setText(finalStringBuilder.toString());
-                }
-                
-                // 获取当前在线的主播ID集合
-                Set<String> currentLiveUperIds = new HashSet<>(liveIdMap.keySet());
-                
-                // 清理不在直播列表中的直播间
-                for (String uperId : new HashSet<>(LiveWatchService.roomStatuses.keySet())) {
-                    if (!currentLiveUperIds.contains(uperId)) {
-                        Log.d(TAG, "主播已下播或经验已满，停止观看: " + uperId);
-                        Intent intent = new Intent(this, LiveWatchService.class);
-                        intent.putExtra("uperId", uperId);
-                        intent.putExtra("action", "stop");
-                        startService(intent);
+                if (!showingStats && binding != null) {
+                    String finalText = finalStringBuilder.toString();
+                    if (finalText.trim().isEmpty()) {
+                        finalText = "当前没有正在直播的已关注主播";
                     }
+                    binding.liveListText.setText(finalText);
                 }
                 
-                // 启动服务
-                for (Map.Entry<String, String> entry : liveIdMap.entrySet()) {
-                    String uperId = entry.getKey();
-                    
-                    // 检查服务是否已经在运行
-                    if (LiveWatchService.roomStatuses.containsKey(uperId)) {
-                        continue;  // 如果已经在运行，跳过
-                    }
-                    
-                    WatchStatsManager.WatchData data = WatchStatsManager.getInstance(this).getAllStats().get(uperId);
-                    String nickname = data != null ? data.name : uperId;
-                    
-                    // 记录开始观看
-                    // LogUtils.logEvent("WATCH", String.format("开始观看: %s(%s)", nickname, uperId));
-                    //暂时注释
-                    Intent intent = new Intent(this, LiveWatchService.class);
-                    intent.putExtra("uperId", uperId);
-                    intent.putExtra("liveId", entry.getValue());
-                    intent.putExtra("nickname", nickname);
-                    startService(intent);
-                }
+                // 发送广播通知Service更新直播列表
+                Intent updateIntent = new Intent(LiveWatchService.ACTION_UPDATE_WATCH_LIST);
+                updateIntent.putExtra("liveMap", new HashMap<>(liveIdMap));
+                sendBroadcast(updateIntent);
             });
         }
     }
@@ -507,45 +527,39 @@ public class MainActivity extends AppCompatActivity {
             Collections.sort(sortedStats, (a, b) -> 
                 b.getValue().degree - a.getValue().degree);
             
-            // 建显示文本
+            // 构建显示文
             for (Map.Entry<String, WatchStatsManager.WatchData> entry : sortedStats) {
                 WatchStatsManager.WatchData data = entry.getValue();
-                stats.append(String.format("【%s】今日验值: %d/360\n",
+                stats.append(String.format("【%s】今日经验值: %d/360\n",
                     data.name, data.degree));
             }
             
-            liveListText.setVisibility(View.GONE);
-            statsText.setVisibility(View.VISIBLE);
-            statsText.setText(stats.toString());
-            toggleStatsText.setText("点击返回直播间列表");
+            binding.liveListText.setVisibility(View.GONE);
+            binding.statsText.setVisibility(View.VISIBLE);
+            binding.statsText.setText(stats.toString());
+            binding.toggleStatsText.setText("点击返回直播间列表");
         } else {
-            statsText.setVisibility(View.GONE);
-            liveListText.setVisibility(View.VISIBLE);
-            toggleStatsText.setText("点击查看统计信息");
+            binding.statsText.setVisibility(View.GONE);
+            binding.liveListText.setVisibility(View.VISIBLE);
+            binding.toggleStatsText.setText("点击查看统计信息");
         }
     }
     
     private void checkServiceRunning() {
-        ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-        boolean isServiceRunning = false;
-        
-        for (ActivityManager.RunningServiceInfo service : manager.getRunningServices(Integer.MAX_VALUE)) {
-            if (LiveWatchService.class.getName().equals(service.service.getClassName())) {
-                isServiceRunning = true;
-                break;
-            }
-        }
-        
-        // 传入 this 作为 Context
-        if (!isServiceRunning && !LiveWatchService.wasManuallyRemoved(this)) {
-            Logger.d(TAG, "服务意外停止，正在重启...");
-            Intent intent = new Intent(this, LiveWatchService.class);
-            intent.putExtra("action", "restart");
-            try {
-                startForegroundService(intent);
-                LogUtils.logEvent("SERVICE", "服务意外停止重启");
-            } catch (Exception e) {
-                LogUtils.logEvent("ERROR", "服务重启失败: " + e.getMessage());
+        // 只有在未被手动停止时才检查和重启服务
+        if (!LiveWatchService.isTemporaryStopped(this)) {
+            if (!LiveWatchService.isServiceFullyRunning(this)) {
+                LogUtils.logEvent("SERVICE", "服务未运行，尝试重启");
+                
+                // 重启服务
+                Intent intent = new Intent(this, LiveWatchService.class);
+                intent.putExtra("action", "restart");
+                try {
+                    startForegroundService(intent);
+                    LogUtils.logEvent("SERVICE", "服务重启成功");
+                } catch (Exception e) {
+                    LogUtils.logEvent("ERROR", "服务重启失败: " + e.getMessage());
+                }
             }
         }
     }
@@ -554,7 +568,11 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         Logger.d(TAG, "Activity恢复，检查服务状态");
-        checkServiceRunning();
+        
+        // 只在未被手动停止时检查服务状态
+        if (!LiveWatchService.isTemporaryStopped(this)) {
+            checkServiceRunning();
+        }
     }
     
     private void checkBackgroundPermission() {
@@ -569,7 +587,7 @@ public class MainActivity extends AppCompatActivity {
                 new AlertDialog.Builder(this)
                     .setTitle("需要允许后台运行")
                     .setMessage("为了保证功能正常运行，请在接下来的设置中允许应用后台运行")
-                    .setPositiveButton("去设置", (dialog, which) -> {
+                    .setPositiveButton("去置", (dialog, which) -> {
                         try {
                             // 跳转到应用详情页面
                             Intent settingsIntent = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
@@ -632,18 +650,18 @@ public class MainActivity extends AppCompatActivity {
                                     Toast.makeText(this, "无法打开自启动设置界面", Toast.LENGTH_SHORT).show();
                                 }
                             })
-                            .setNegativeButton("取消", (dialog, which) -> {
+                            .setNegativeButton("取", (dialog, which) -> {
                                 Toast.makeText(MainActivity.this,
                                     "未设置自启动可能会影响应用在后台运行", Toast.LENGTH_LONG).show();
                                 LogUtils.logEvent("PERMISSION", "用户取消设置自启动权限");
                             })
                             .setOnDismissListener(dialog -> {
-                                // 无论选择什么，都标记为已检查
+                                // 无论用户选择了什么，都标记为已检查
                                 prefs.edit().putBoolean(KEY_AUTOSTART_CHECKED, true).apply();
                             })
                             .show();
                     } else {
-                        // 如果没有找到对应的设置界面，也标记为已检查
+                        // 如果没有找到对应的设置界面，也标记为已查
                         prefs.edit().putBoolean(KEY_AUTOSTART_CHECKED, true).apply();
                     }
                 } else {
@@ -651,7 +669,7 @@ public class MainActivity extends AppCompatActivity {
                     prefs.edit().putBoolean(KEY_AUTOSTART_CHECKED, true).apply();
                 }
             } catch (Exception e) {
-                Logger.e(TAG, "检查自启动权限失败", e);
+                Logger.e(TAG, "检查自启动限失败", e);
                 LogUtils.logEvent("ERROR", "检查自启动权限失败: " + e.getMessage());
                 // 发生错误时也标记为已检查，避免反复提示
                 prefs.edit().putBoolean(KEY_AUTOSTART_CHECKED, true).apply();
@@ -683,13 +701,13 @@ public class MainActivity extends AppCompatActivity {
     
     // 添加通知权限检查方法
     private void checkNotificationPermission() {
-        // 仅在 Android 13 及以上版本需要动态请求通知权限
+        // 仅在 Android 13 及以上版本需要动态请求通权限
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) 
                     != PackageManager.PERMISSION_GRANTED) {
                 new AlertDialog.Builder(this)
                     .setTitle("需要通知权限")
-                    .setMessage("为了保证服务长时间运行，请允许应用通知权限")
+                    .setMessage("为了保证服务时间运行，请允许应用通知权限")
                     .setPositiveButton("去设置", (dialog, which) -> {
                         requestPermissions(
                             new String[]{android.Manifest.permission.POST_NOTIFICATIONS},
@@ -712,7 +730,7 @@ public class MainActivity extends AppCompatActivity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == 1001) {  // 通知权限的请求码
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                // 用户授予了权限
+                // 用户授予权限
                 LogUtils.logEvent("PERMISSION", "通知权限已授予");
             } else {
                 // 用户拒绝了权限
@@ -732,7 +750,7 @@ public class MainActivity extends AppCompatActivity {
             if (!pm.isIgnoringBatteryOptimizations(packageName)) {
                 new AlertDialog.Builder(this)
                     .setTitle("需要忽略电池优化")
-                    .setMessage("请在接下来的界面中允许忽略电池优化，以保证应用正常运行")
+                    .setMessage("请在下来的界面中允许忽略电池优化，以保证应用正常运行")
                     .setPositiveButton("去设置", (dialog, which) -> {
                         try {
                             Intent intent = new Intent();
@@ -753,4 +771,248 @@ public class MainActivity extends AppCompatActivity {
             }
         }
     }
+    
+    private void checkUpdate() {
+        Request request = new Request.Builder()
+            .url(UPDATE_CHECK_URL)
+            .build();
+            
+        client.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                Logger.e(TAG, "检查更新失败", e);
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                try {
+                    String json = response.body().string();
+                    JSONObject release = new JSONObject(json);
+                    
+                    String latestVersion = release.getString("tag_name").replace("v", "");  // 移除 "v" 前缀
+                    String currentVersion = getPackageManager()
+                        .getPackageInfo(getPackageName(), 0)
+                        .versionName;
+                    
+                    // 检查是否忽略该版本
+                    SharedPreferences prefs = getSharedPreferences("update_prefs", MODE_PRIVATE);
+                    String ignoredVersion = prefs.getString(PREF_IGNORED_VERSION, "");
+                    
+                    if (!latestVersion.equals(currentVersion) && !latestVersion.equals(ignoredVersion)) {
+                        // 获取下载链接
+                        String downloadUrl = "";
+                        JSONArray assets = release.getJSONArray("assets");
+                        for (int i = 0; i < assets.length(); i++) {
+                            JSONObject asset = assets.getJSONObject(i);
+                            String name = asset.getString("name");
+                            if (name.endsWith(".apk")) {
+                                downloadUrl = asset.getString("browser_download_url");
+                                break;
+                            }
+                        }
+                        
+                        final String finalDownloadUrl = downloadUrl;
+                        runOnUiThread(() -> {
+                            updateTipText.setVisibility(View.VISIBLE);
+                            updateTipText.setTag(new UpdateInfo(
+                                latestVersion,
+                                release.optString("name", "新版本"),
+                                release.optString("body", "暂无更新说明"),
+                                finalDownloadUrl
+                            ));
+                        });
+                    }
+                } catch (Exception e) {
+                    Logger.e(TAG, "解析更新信息失败", e);
+                }
+            }
+        });
+    }
+    
+    private void showUpdateDialog() {
+        UpdateInfo updateInfo = (UpdateInfo) updateTipText.getTag();
+        if (updateInfo == null) return;
+        
+        new AlertDialog.Builder(this)
+            .setTitle("发现新版本: " + updateInfo.version)
+            .setMessage(updateInfo.description)
+            .setPositiveButton("去下载", (dialog, which) -> {
+                try {
+                    // 直接使用获取到的下载链接
+                    Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(updateInfo.downloadUrl));
+                    startActivity(browserIntent);
+                    LogUtils.logEvent("UPDATE", "用户点击下载新版本: " + updateInfo.version);
+                } catch (Exception e) {
+                    LogUtils.logEvent("ERROR", "打开下载链接失败: " + e.getMessage());
+                    Toast.makeText(this, "打开下载链接失败", Toast.LENGTH_SHORT).show();
+                }
+            })
+            .setNeutralButton("忽略该版本", (dialog, which) -> {
+                getSharedPreferences("update_prefs", MODE_PRIVATE)
+                    .edit()
+                    .putString(PREF_IGNORED_VERSION, updateInfo.version)
+                    .apply();
+                updateTipText.setVisibility(View.GONE);
+                LogUtils.logEvent("UPDATE", "用户忽略版本: " + updateInfo.version);
+            })
+            .setNegativeButton("取消", null)
+            .show();
+    }
+    
+    private static class UpdateInfo {
+        String version;
+        String name;
+        String description;
+        String downloadUrl;
+        
+        UpdateInfo(String version, String name, String description, String downloadUrl) {
+            this.version = version;
+            this.name = name;
+            this.description = description;
+            this.downloadUrl = downloadUrl;
+        }
+    }
+    
+    private void updateUIForWatchStatus(String uperId, boolean isWatching) {
+        runOnUiThread(() -> {
+            if (!showingStats) {  // 只在显示直播列表时更新
+                StringBuilder builder = new StringBuilder();
+                
+                // 获取当前统计信息
+                WatchStatsManager.WatchData data = WatchStatsManager.getInstance(this)
+                    .getAllStats().get(uperId);
+                String nickname = data != null ? data.name : uperId;
+                
+                if (isWatching) {
+                    builder.append(String.format("正在观看: %s (%d/360)\n", 
+                        nickname, 
+                        data != null ? data.degree : 0));
+                }
+                
+                // 更新文本显示
+                if (liveListText != null) {
+                    String currentText = liveListText.getText().toString();
+                    if (!currentText.isEmpty()) {
+                        builder.append(currentText);
+                    }
+                    liveListText.setText(builder.toString());
+                }
+            }
+        });
+    }
+    
+ 
+
+    
+    // 添加重启服务的方法
+    private void restartService() {
+        // 清除临时停止状态
+        LiveWatchService.setTemporaryStop(this, false);
+        
+        // 重启服务
+        Intent intent = new Intent(this, LiveWatchService.class);
+        intent.putExtra("action", "restart");
+        try {
+            startForegroundService(intent);
+            LogUtils.logEvent("SERVICE", "服务手动重启");
+            Toast.makeText(this, "服务已重启", Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            LogUtils.logEvent("ERROR", "服务重启失败: " + e.getMessage());
+            Toast.makeText(this, "服务重启失败", Toast.LENGTH_SHORT).show();
+        }
+    }
+    
+
+
+    
+    // 添加服务运行状态检查方法
+    private boolean isServiceActuallyRunning() {
+        try {
+            ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            if (manager != null) {
+                for (ActivityManager.RunningServiceInfo service : manager.getRunningServices(Integer.MAX_VALUE)) {
+                    if (LiveWatchService.class.getName().equals(service.service.getClassName())) {
+                        return service.foreground && service.pid > 0;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LogUtils.logEvent("ERROR", "服务状态检查失败: " + e.getMessage());
+        }
+        return false;
+    }
+    
+    
+  
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        getMenuInflater().inflate(R.menu.main_menu, menu);
+        return true;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        // 添加日志来调试
+        Logger.d(TAG, "菜单项被点击: " + item.getItemId());
+        
+        if (item.getItemId() == R.id.action_stop_service) {
+            Logger.d(TAG, "停止服务菜单项被点击");
+            
+            AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("确认停止")
+                .setMessage("应用将在2秒后关闭")
+                .setPositiveButton("确定", (d, which) -> {
+                    Logger.d(TAG, "用户确认停止服务");
+                    Toast.makeText(this, "正在停止服务...", Toast.LENGTH_SHORT).show();
+                    
+                    // 1. 先停止服务
+                    stopService(new Intent(this, LiveWatchService.class));
+                    
+                    // 2. 重置临时停止标识
+                    LiveWatchService.setTemporaryStop(this, false);
+                    
+                    // 3. 记录关闭事件
+                    LogUtils.logEvent("APP", "用户手动停止应用");
+                    
+                    // 4. 延迟3秒后关闭应用，给予更多时间完成清理
+                    new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                        try {
+                            // 等待服务完全停止
+                            Thread.sleep(1000);
+                            
+                            // 关闭日志系统
+                            LogUtils.shutdown();
+                            
+                            // 再次等待确保日志写入
+                            Thread.sleep(500);
+                            
+                            // 最后关闭应用
+                            finishAndRemoveTask();
+                            System.exit(0);
+                        } catch (InterruptedException e) {
+                            // 忽略中断，继续退出流程
+                            finishAndRemoveTask();
+                            System.exit(0);
+                        }
+                    }, 3000);
+                })
+                .setNegativeButton("取消", (d, which) -> {
+                Logger.d(TAG, "用户取消停止服务");
+                })
+                .create();
+            
+            dialog.show();
+            return true;
+        }
+        return super.onOptionsItemSelected(item);
+    }
+    //cookie失效关闭应用广播接收器
+    private BroadcastReceiver finishReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if ("com.example.acdemo.ACTION_FINISH".equals(intent.getAction())) {
+                finish();
+            }
+        }
+    };
 }

@@ -115,11 +115,9 @@ public class LiveWatchService extends Service {
                 // 获取当前小时和分钟
                 Calendar now = Calendar.getInstance();
                 int currentHour = now.get(Calendar.HOUR_OF_DAY);
-                int currentMinute = now.get(Calendar.MINUTE);
                 
-                // 只在0点附近检查重置（23:55-00:05）
-                if ((currentHour == 23 && currentMinute >= 55) || 
-                    (currentHour == 0 && currentMinute <= 5)) {
+                // 0点后重置统计
+                if (currentHour == 0) {
                     StatsManager.getInstance().checkAndResetStats();
                 }
                 
@@ -128,8 +126,6 @@ public class LiveWatchService extends Service {
                     updateNotification();
                     lastNotificationUpdateTime = currentTime;
                 }
-                
-              
                 
                 // 刷新直播列表（每3分钟）
                 if (shouldRefreshList(currentTime)) {

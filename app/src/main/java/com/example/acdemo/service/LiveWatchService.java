@@ -473,7 +473,27 @@ public class LiveWatchService extends Service {
     private void loadLiveRoom(WebView webView, String liveId, String uperId) {
         // 保在主线程中执行
         mainHandler.post(() -> {
+            String cookies = CookieManager.getCookies(); // 获取 Cookie
+    
+
+            android.webkit.CookieManager webCookieManager = android.webkit.CookieManager.getInstance();
+            webCookieManager.setAcceptCookie(true);
+            webCookieManager.removeAllCookies(null);
+
+            if (cookies != null && !cookies.isEmpty()) {
+                String[] cookiePairs = cookies.split(";");
+                for (String cookiePair : cookiePairs) {
+                    cookiePair = cookiePair.trim();
+                    if (!cookiePair.isEmpty()) {
+                        webCookieManager.setCookie(".acfun.cn", cookiePair);
+                        
+                    }
+                }
+                webCookieManager.flush();
+            }
+
             String liveUrl = String.format("https://live.acfun.cn/room/%s?theme=default&showAuthorclubOnly=", uperId);
+         
             webView.loadUrl(liveUrl);
             updateNotification();//更新通知栏
         });

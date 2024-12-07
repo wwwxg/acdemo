@@ -121,8 +121,7 @@ public class MainActivity extends AppCompatActivity {
 
         
         // 2. 后台运行相关权限
-        checkBackgroundPermission();  // 后台运行权限
-        checkBatteryOptimization();   // 电池优化（封装成方法）
+        checkBackgroundPermission();  // 后台运行权限和电池优化
         checkAutoStartPermission();   // 自启动权限
         
         // 3. 最后检查服务状态
@@ -577,29 +576,38 @@ public class MainActivity extends AppCompatActivity {
     
     private void checkBackgroundPermission() {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-            Intent intent = new Intent();
             String packageName = getPackageName();
             android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
             
-            // 检查是否有后台运行权限
+            // 检查电池优化权限
             if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                // 显示对话框提示用户
                 new AlertDialog.Builder(this)
-                    .setTitle("需要允许后台运行")
-                    .setMessage("为了保证功能正常运行，请在接下来的设置中允许应用后台运行")
-                    .setPositiveButton("去置", (dialog, which) -> {
+                    .setTitle("需要忽略电池优化")
+                    .setMessage("请在接下来的设置中允许忽略电池优化，以保证应用正常运行")
+                    .setPositiveButton("去设置", (dialog, which) -> {
                         try {
-                            // 跳转到应用详情页面
-                            Intent settingsIntent = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
-                            settingsIntent.setData(android.net.Uri.parse("package:" + packageName));
-                            startActivity(settingsIntent);
+                            // 先尝试直接请求忽略电池优化
+                            Intent intent = new Intent();
+                            intent.setAction(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                            intent.setData(Uri.parse("package:" + packageName));
+                            startActivity(intent);
+                            LogUtils.logEvent("PERMISSION", "用户前往设置电池优化");
                         } catch (Exception e) {
-                            // 如果跳转失败，尝试跳转到通用设置页面
-                            Intent generalIntent = new Intent(android.provider.Settings.ACTION_SETTINGS);
-                            startActivity(generalIntent);
+                            // 如果直接请求失败，跳转到应用详情页
+                            try {
+                                Intent settingsIntent = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                                settingsIntent.setData(android.net.Uri.parse("package:" + packageName));
+                                startActivity(settingsIntent);
+                            } catch (Exception e2) {
+                                LogUtils.logEvent("ERROR", "打开设置失败: " + e2.getMessage());
+                                Toast.makeText(this, "无法打开设置界面", Toast.LENGTH_SHORT).show();
+                            }
                         }
                     })
-                    .setNegativeButton("取消", null)
+                    .setNegativeButton("取消", (dialog, which) -> {
+                        Toast.makeText(this, "未关闭电池优化可能影响应用在后台运行", Toast.LENGTH_LONG).show();
+                        LogUtils.logEvent("PERMISSION", "用户取消设置电池优化");
+                    })
                     .show();
             }
         }
@@ -687,6 +695,7 @@ public class MainActivity extends AppCompatActivity {
     }
     
     
+  
     private void handleNetworkError(Exception e) {
         LogUtils.logEvent("ERROR", "网络错误: " + e.getMessage());
     }
